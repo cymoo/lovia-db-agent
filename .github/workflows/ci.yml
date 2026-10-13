@@ -10,10 +10,11 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      # With python-version, setup-uv creates and activates .venv itself.
       - uses: astral-sh/setup-uv@v5
         with:
           python-version: "3.12"
-      - run: uv venv && uv pip install -e ".[dev]"
+      - run: uv pip install -e ".[dev]"
       - run: uv run --no-sync ruff check .
       - run: uv run --no-sync ruff format --check .
       - run: uv run --no-sync mypy
@@ -52,9 +53,12 @@ jobs:
       - name: Load the demo data
         run: |
           PGPASSWORD=postgres psql -h localhost -U postgres -d demo_shop -v ON_ERROR_STOP=1 -q -f examples/demo_postgres.sql
+          # The health check can pass on MySQL's temporary init server; wait
+          # until the real one answers.
+          for i in $(seq 1 60); do mysql -h 127.0.0.1 -uroot -proot -e "SELECT 1" >/dev/null 2>&1 && break; sleep 2; done
           mysql -h 127.0.0.1 -uroot -proot < examples/demo_mysql.sql
       - uses: astral-sh/setup-uv@v5
         with:
           python-version: ${{ matrix.python-version }}
-      - run: uv venv && uv pip install -e ".[dev]"
+      - run: uv pip install -e ".[dev]"
       - run: uv run --no-sync pytest -v -ra
