@@ -1,0 +1,34 @@
+# lovia-db-agent configuration. Copy to config.yaml and edit.
+# Connection URLs live in the environment (or .env), never in this file.
+
+connections:
+  # The key is the database's name, as the model and users refer to it.
+  shop:
+    url_env: DB_DEMO_URL          # postgresql+asyncpg://... or mysql+asyncmy://...
+    description: 演示网店：会员、商品、订单、订单明细、退款
+    # schemas: [shop]             # discovery scope; default: every readable schema
+                                  # (MySQL: the URL's database)
+    # exclude_tables: ["tmp_*"]   # glob patterns left out of discovery
+    timezone: Asia/Shanghai       # what "today" means in SQL; also how times display
+
+# Extra instructions: language, tone, house rules.
+instructions: |
+  用中文回答。金额单位是元，保留两位小数。
+
+# Business definitions, join paths, gotchas — one SKILL.md per topic.
+skills_dir: skills
+
+# Where chats and cached results live.
+data_dir: .data
+
+# limits:
+#   statement_timeout_s: 15     # server-side cap per statement
+#   query_rows: 50              # rows the model sees from `query`
+#   preview_rows: 20            # rows of a big table the model sees (the user sees all)
+#   cache_rows: 10000           # most rows a table keeps for the user
+#   chart_rows: 5000            # most rows a chart query may return
+#   chart_max_series: 20
+#   chart_inline_bytes: 4096    # bigger chart data is cached; the model gets a summary
+#   catalog_budget_tokens: 2000 # system-prompt room for the table list
+#   result_ttl_days: 30
+#   result_cache_mb: 500

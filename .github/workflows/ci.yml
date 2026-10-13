@@ -1,0 +1,60 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+        with:
+          python-version: "3.12"
+      - run: uv venv && uv pip install -e ".[dev]"
+      - run: uv run --no-sync ruff check .
+      - run: uv run --no-sync ruff format --check .
+      - run: uv run --no-sync mypy
+
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.10", "3.12"]
+    # Real databases for the integration tests (tests/test_postgres.py,
+    # tests/test_mysql.py), loaded with the demo data.
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: demo_shop
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U postgres" --health-interval 5s
+          --health-timeout 5s --health-retries 10
+      mysql:
+        image: mysql:8.4
+        env:
+          MYSQL_ROOT_PASSWORD: root
+        ports: ["3306:3306"]
+        options: >-
+          --health-cmd "mysqladmin ping -proot" --health-interval 5s
+          --health-timeout 5s --health-retries 20
+    env:
+      DB_AGENT_TEST_PG_URL: postgresql+asyncpg://agent_ro:agent_ro@localhost:5432/demo_shop
+      DB_AGENT_TEST_MYSQL_URL: mysql+asyncmy://agent_ro:agent_ro@127.0.0.1:3306/demo_shop
+    steps:
+      - uses: actions/checkout@v4
+      - name: Load the demo data
+        run: |
+          PGPASSWORD=postgres psql -h localhost -U postgres -d demo_shop -v ON_ERROR_STOP=1 -q -f examples/demo_postgres.sql
+          mysql -h 127.0.0.1 -uroot -proot < examples/demo_mysql.sql
+      - uses: astral-sh/setup-uv@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+      - run: uv venv && uv pip install -e ".[dev]"
+      - run: uv run --no-sync pytest -v -ra
