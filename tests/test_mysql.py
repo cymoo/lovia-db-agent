@@ -20,7 +20,6 @@ from db_agent.app import build_agent
 from db_agent.config import Connection, Limits, Settings
 from db_agent.execute import Database
 from db_agent.plugin import SQLDatabase
-from db_agent.results import ResultCache
 
 URL_ENV = "DB_AGENT_TEST_MYSQL_URL"
 pytestmark = pytest.mark.skipif(not os.environ.get(URL_ENV), reason=f"set {URL_ENV}")
@@ -34,8 +33,7 @@ def _settings(tmp_path: Path) -> Settings:
 
 async def _run(settings: Settings, *calls: Any) -> tuple[list[ToolResultEntry], ScriptedProvider]:
     provider = ScriptedProvider([*calls, text("done")])
-    cache = ResultCache(settings.data_dir / "results.db", ttl_days=1, max_mb=50)
-    db = SQLDatabase(settings, cache)
+    db = SQLDatabase(settings)
     try:
         result = await Runner.run(build_agent(settings, db, model=provider), "question")
     finally:
@@ -76,7 +74,9 @@ async def test_tables_and_a_pivoted_chart(tmp_path: Path) -> None:
         ),
     )
     env = json.loads(table.output)["lovia_ui"]
-    assert env["kind"] == "db.table" and env["props"]["row_count"] == 6000
+    # Outside a lovia web run there is no chat to keep the rows in: the
+    # envelope is just the preview.
+    assert env["kind"] == "table" and env["props"]["row_count"] == 6000 and "data" not in env
     props = json.loads(chart.output)["lovia_ui"]["props"]
     header = props["dataset"]["source"][0]
     # Categories come in the order they first appear in the rows.

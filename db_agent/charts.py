@@ -14,7 +14,7 @@ from typing import Any
 
 from lovia import ToolError
 
-from .results import column_stats
+from .stats import column_stats
 
 __all__ = ["apply_pivot", "check_encode", "summarize"]
 

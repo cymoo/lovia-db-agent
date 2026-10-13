@@ -3,8 +3,9 @@
 It contributes five tools and a system-prompt section listing the databases
 and (within a budget) their tables. Two of the tools explore, for the model
 only; two answer, for the user — a table or a chart drawn from the query's
-rows, so no number passes through the model's output. Big results stay
-server-side (`ResultCache`); the model sees a preview and per-column stats.
+rows, so no number passes through the model's output. A big result is kept
+with the chat (lovia's ``put_ui_data``) for the page to draw; the model sees
+a preview and per-column stats.
 
 Pools and catalogs live on the plugin object, created on first use: lovia
 calls ``setup()`` once per run, and they must outlive runs.
@@ -19,13 +20,13 @@ from typing import Annotated, Any
 
 from lovia import PluginInstance, ToolError, tool
 from lovia.tools.base import Tool
-from lovia.web import ui_result, validate_chart_option
+from lovia.web import put_ui_data, ui_result, validate_chart_option
 
 from .catalog import Catalog, describe, load_catalog
 from .charts import apply_pivot, check_encode, summarize
 from .config import Settings
 from .execute import Database
-from .results import ResultCache, column_stats
+from .stats import column_stats
 
 __all__ = ["SQLDatabase"]
 
@@ -66,9 +67,8 @@ class SQLDatabase:
 
     name = "sql_database"
 
-    def __init__(self, settings: Settings, cache: ResultCache) -> None:
+    def __init__(self, settings: Settings) -> None:
         self.limits = settings.limits
-        self.cache = cache
         self.databases = {
             name: Database(name, conn, settings.limits)
             for name, conn in settings.connections.items()
@@ -250,10 +250,9 @@ class SQLDatabase:
                 props["truncated"] = True
             if len(res.rows) <= limits.preview_rows and _size(props) <= OUTPUT_CHARS:
                 return ui_result("table", props)
-            rid = await asyncio.to_thread(self.cache.put, res.columns, res.rows)
+            ref = await put_ui_data(props)
             n = len(res.rows)
             props.update(
-                data_url=f"ext/results/{rid}",
                 stats=column_stats(res.columns, res.rows),
                 note=(
                     f"The user sees all {n:,}"
@@ -261,7 +260,7 @@ class SQLDatabase:
                     + " rows; you see the first {shown}. Use SQL for totals and rankings."
                 ),
             )
-            return ui_result("db.table", _fit_preview(props, limits.preview_rows))
+            return ui_result("table", _fit_preview(props, limits.preview_rows), data=ref)
 
         async def query_chart(
             sql: Annotated[str, "One read-only statement; aggregate in SQL."],
@@ -317,17 +316,14 @@ class SQLDatabase:
             validate_chart_option(full)
             if _size([columns, *rows]) <= limits.chart_inline_bytes:
                 return ui_result("chart", full)
-            rid = await asyncio.to_thread(self.cache.put, columns, rows)
-            return ui_result(
-                "db.chart",
-                {
-                    "option": option,
-                    "data_url": f"ext/results/{rid}",
-                    "summary": summarize(columns, rows),
-                    "note": f"The user sees the chart of all {len(rows):,} rows; "
-                    "you see a summary.",
-                },
-            )
+            # The preview is the option without its data: a chart frame, should
+            # the data be gone. The chart drops the keys meant for the model.
+            preview = {
+                **option,
+                "summary": summarize(columns, rows),
+                "note": f"The user sees the chart of all {len(rows):,} rows; you see a summary.",
+            }
+            return ui_result("chart", preview, data=await put_ui_data(full))
 
         return [
             tool(search_schema, timeout=timeout),

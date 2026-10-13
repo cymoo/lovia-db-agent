@@ -69,14 +69,13 @@ skills_dir: skills
 | `search_schema` | 模型 | 匹配的表和列 |
 | `describe_tables` | 模型 | 列、主外键、索引、3 行样例 |
 | `query` | 模型 | 最多 50 行文本 |
-| `query_table` | 用户 | 表格（`ui_result("table")`；结果大时是预览 + `data_url`） |
+| `query_table` | 用户 | 表格（`ui_result("table")`；结果大时模型只看预览） |
 | `query_chart` | 用户 | 由查询结果绘制的 ECharts 图（`pivot` 按类别拆成多条序列） |
 
 另外还有 lovia 自带的 `show_chart`（用于单个查询拿不到的数据）和 `now`。
 
-大结果存进一个小型 SQLite 缓存（`data_dir/results.db`，有过期时间和容量上限），通过
-`/ext/results/{id}` 提供，和 API 用同一个 token 鉴权；`db_agent/static/db.js` 把数据取回来，
-再通过 `lovia.getRenderer` 交给 lovia 内置的表格和图表渲染器。缓存过期后回落到预览。
+大结果不进模型上下文：lovia 的 `put_ui_data` 把完整数据随聊天保存（删除聊天时一并删除），
+模型只看预览和各列统计，页面用 lovia 内置的表格和图表画出全部数据，聊天里和导出的 HTML 中都是。
 
 页面带有 Content-Security-Policy，不加载外部图片：即使数据库里埋了恶意文本，也没法让回复
 借图片地址把数据带出去。

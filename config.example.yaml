@@ -18,7 +18,7 @@ instructions: |
 # Business definitions, join paths, gotchas — one SKILL.md per topic.
 skills_dir: skills
 
-# Where chats and cached results live.
+# Where chats live (big results are kept with their chat).
 data_dir: .data
 
 # limits:
@@ -28,7 +28,5 @@ data_dir: .data
 #   cache_rows: 10000           # most rows a table keeps for the user
 #   chart_rows: 5000            # most rows a chart query may return
 #   chart_max_series: 20
-#   chart_inline_bytes: 4096    # bigger chart data is cached; the model gets a summary
+#   chart_inline_bytes: 4096    # bigger chart data stays out of the model's view; it gets a summary
 #   catalog_budget_tokens: 2000 # system-prompt room for the table list
-#   result_ttl_days: 30
-#   result_cache_mb: 500

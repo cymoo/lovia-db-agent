@@ -71,11 +71,9 @@ class Limits(BaseModel):
     chart_max_series: int = Field(20, ge=1)
     chart_inline_bytes: int = Field(4096, ge=0)
     """Chart data up to this size travels in the tool output (the model sees
-    it); bigger data is cached and the model gets a summary."""
+    it); bigger data is kept with the chat and the model gets a summary."""
     catalog_budget_tokens: int = Field(2000, ge=0)
     """How much of the system prompt the table list may take, all databases together."""
-    result_ttl_days: float = Field(30, gt=0)
-    result_cache_mb: float = Field(500, gt=0)
 
 
 class Settings(BaseModel):
@@ -84,7 +82,7 @@ class Settings(BaseModel):
     instructions: str = ""
     """Extra instructions for the agent: language, tone, house rules."""
     data_dir: Path = Path(".data")
-    """Where chats and cached results live."""
+    """Where chats live (big results are kept with their chat)."""
     skills_dir: Path | None = None
     """A directory of SKILL.md files: business definitions, join paths, gotchas."""
 

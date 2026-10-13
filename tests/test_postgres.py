@@ -19,14 +19,16 @@ from fastapi.testclient import TestClient
 from lovia import Runner, ToolError
 from lovia.testing import ScriptedProvider, call, text
 from lovia.transcript import ToolResultEntry
+from lovia.web.components import UI_DATA_SINK
+from lovia.web.store import ChatStore
 
 from db_agent.app import build_agent, build_app
 from db_agent.config import Connection, Limits, Settings
 from db_agent.execute import Database
 from db_agent.plugin import SQLDatabase
-from db_agent.results import ResultCache
 
 URL_ENV = "DB_AGENT_TEST_PG_URL"
+SID = "chat-1"
 pytestmark = pytest.mark.skipif(not os.environ.get(URL_ENV), reason=f"set {URL_ENV}")
 
 
@@ -42,20 +44,28 @@ def _settings(tmp_path: Path, **limits: Any) -> Settings:
 
 async def _run(
     settings: Settings, *calls: Any
-) -> tuple[list[ToolResultEntry], ScriptedProvider, ResultCache]:
+) -> tuple[list[ToolResultEntry], ScriptedProvider, ChatStore]:
     provider = ScriptedProvider([*calls, text("done")])
-    cache = ResultCache(settings.data_dir / "results.db", ttl_days=1, max_mb=50)
-    db = SQLDatabase(settings, cache)
+    store = ChatStore.in_memory()
+    await store.upsert(SID)
+    db = SQLDatabase(settings)
+    token = UI_DATA_SINK.set((store, SID))  # what lovia web sets for each run
     try:
         result = await Runner.run(build_agent(settings, db, model=provider), "question")
     finally:
+        UI_DATA_SINK.reset(token)
         await db.aclose()
-    return [e for e in result.entries if isinstance(e, ToolResultEntry)], provider, cache
+    return [e for e in result.entries if isinstance(e, ToolResultEntry)], provider, store
 
 
 def _envelope(entry: ToolResultEntry) -> dict[str, Any]:
     assert not entry.is_error, entry.output
     return json.loads(entry.output)["lovia_ui"]
+
+
+async def _stored(store: ChatStore, env: dict[str, Any]) -> dict[str, Any]:
+    """The full props the page fetches for this envelope."""
+    return json.loads(await store.get_ui_data(SID, env["data"]) or b"")
 
 
 async def test_the_system_prompt_lists_the_tables(tmp_path: Path) -> None:
@@ -108,8 +118,8 @@ async def test_a_small_table_travels_whole(tmp_path: Path) -> None:
     assert env["props"]["columns"] == ["category", "n"] and len(env["props"]["rows"]) == 4
 
 
-async def test_a_big_table_sends_a_preview_and_caches_the_rest(tmp_path: Path) -> None:
-    (out,), _, cache = await _run(
+async def test_a_big_table_sends_a_preview_and_keeps_the_rest(tmp_path: Path) -> None:
+    (out,), _, store = await _run(
         _settings(tmp_path, cache_rows=5000),
         call(
             "query_table",
@@ -118,11 +128,12 @@ async def test_a_big_table_sends_a_preview_and_caches_the_rest(tmp_path: Path) -
     )
     env = _envelope(out)
     props = env["props"]
-    assert env["kind"] == "db.table"
+    assert env["kind"] == "table"
     assert len(props["rows"]) == 20 and props["row_count"] == 5000 and props["truncated"] is True
     assert props["stats"]["id"] == {"min": 1, "max": 5000, "sum": 12502500, "nulls": 0}
     assert "first 20" in props["note"]
-    full = json.loads(cache.get(props["data_url"].rsplit("/", 1)[1]) or b"")
+    full = await _stored(store, env)
+    assert full["title"] == "订单" and "note" not in full  # the model's extras stay in the preview
     assert len(full["rows"]) == 5000 and full["rows"][0][0] == 1
     assert full["rows"][0][2].endswith("+08:00")  # the session's time zone
 
@@ -172,18 +183,16 @@ async def test_a_big_chart_sends_a_summary(tmp_path: Path) -> None:
         "yAxis": {},
         "series": [{"type": "line", "encode": {"x": "day", "y": "n"}}],
     }
-    (out,), _, cache = await _run(
+    (out,), _, store = await _run(
         _settings(tmp_path), call("query_chart", {"sql": sql, "option": option})
     )
     env = _envelope(out)
-    assert env["kind"] == "db.chart"
+    assert env["kind"] == "chart"
     summary = env["props"]["summary"]
     assert summary["rows"] > 300 and summary["stats"]["n"]["sum"] == 6000
-    assert "dataset" not in env["props"]["option"]
-    assert json.loads(cache.get(env["props"]["data_url"].rsplit("/", 1)[1]) or b"")["columns"] == [
-        "day",
-        "n",
-    ]
+    assert "dataset" not in env["props"] and env["props"]["series"] == option["series"]
+    source = (await _stored(store, env))["dataset"]["source"]
+    assert source[0] == ["day", "n"] and len(source) == summary["rows"] + 1
 
 
 @pytest.mark.parametrize(
@@ -234,14 +243,11 @@ async def test_the_session_is_read_only_and_time_boxed(tmp_path: Path) -> None:
         await db.aclose()
 
 
-def test_the_app_serves_the_page_the_renderers_and_guarded_results(tmp_path: Path) -> None:
+def test_the_app_serves_the_page_and_guards_the_results(tmp_path: Path) -> None:
     settings = _settings(tmp_path)
     app = build_app(settings, model=ScriptedProvider([]), token="secret-token")
     with TestClient(app) as client:
         page = client.get("/").text
-        assert "img-src 'self' data: blob:" in page and 'src="/ext/db.js"' in page
-        assert "getRenderer('chart')" in client.get("/ext/db.js").text
-        rid = app.state.sql_database.cache.put(["a"], [[1]])
-        assert client.get(f"/ext/results/{rid}").status_code == 401
-        ok = client.get(f"/ext/results/{rid}", headers={"Authorization": "Bearer secret-token"})
-        assert ok.json() == {"columns": ["a"], "rows": [[1]]}
+        assert "img-src 'self' data: blob:" in page and "/ext/" not in page
+        # Big results are lovia's component data, behind the app's token.
+        assert client.get(f"/api/sessions/{SID}/ui-data/{'A' * 22}").status_code == 401

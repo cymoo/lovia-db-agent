@@ -75,15 +75,15 @@ This is the security boundary, so do it properly:
 | `search_schema` | the model | matching tables and columns |
 | `describe_tables` | the model | columns, keys, indexes, 3 sample rows |
 | `query` | the model | up to 50 rows, as text |
-| `query_table` | the user | a table (`ui_result("table")`, or a preview + `data_url` when big) |
+| `query_table` | the user | a table (`ui_result("table")`; when big, the model gets a preview) |
 | `query_chart` | the user | an ECharts chart from the rows (`pivot` for series per category) |
 
 Plus lovia's `show_chart` (for data no single query returns) and `now`.
 
-Big results go to a small SQLite cache (`data_dir/results.db`, TTL + size cap)
-served at `/ext/results/{id}` behind the app's token; `db_agent/static/db.js`
-fetches them and hands them to lovia's built-in renderers through
-`lovia.getRenderer`. Expired results fall back to the preview.
+A big result stays out of the model's context: lovia's `put_ui_data` keeps
+the full rows with the chat (deleted with it), the model reads a preview with
+per-column stats, and the page draws every row with lovia's built-in table and
+chart, in the chat and in its HTML export.
 
 A Content-Security-Policy keeps the page from loading remote images, so text
 planted in the database can't make a reply leak data through an image URL.
