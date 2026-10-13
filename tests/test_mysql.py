@@ -94,10 +94,16 @@ async def test_the_session_is_read_only_and_literals_pass_through() -> None:
         assert "read" in (exc.value.hint or "") and "fix the SQL" not in (exc.value.hint or "")
         res = await db.run("SELECT '12:30' AS t, 'a%b' AS p, 'x' LIKE '%x%' AS l", max_rows=1)
         assert res.rows == [["12:30", "a%b", 1]]
+        # init_command set the session up.
+        res = await db.run(
+            "SELECT @@SESSION.transaction_read_only, @@SESSION.max_execution_time", max_rows=1
+        )
+        assert res.rows == [[1, 1000]]
+        # A pairwise comparison over 12,000 × 12,000 rows: no shortcut, well over 1 s.
         with pytest.raises(ToolError) as exc:
             await db.run(
-                "SELECT COUNT(*) FROM demo_shop.order_items a, demo_shop.order_items b, "
-                "demo_shop.order_items c",
+                "SELECT SUM(a.quantity * b.quantity) FROM demo_shop.order_items a "
+                "JOIN demo_shop.order_items b ON a.unit_price > b.unit_price",
                 max_rows=1,
             )
         assert "took too long" in (exc.value.hint or "")
