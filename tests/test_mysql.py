@@ -78,7 +78,10 @@ async def test_tables_and_a_pivoted_chart(tmp_path: Path) -> None:
     env = json.loads(table.output)["lovia_ui"]
     assert env["kind"] == "db.table" and env["props"]["row_count"] == 6000
     props = json.loads(chart.output)["lovia_ui"]["props"]
-    assert props["dataset"]["source"][0] == ["month", "cancelled", "paid", "shipped"]
+    header = props["dataset"]["source"][0]
+    # Categories come in the order they first appear in the rows.
+    assert header[0] == "month" and sorted(header[1:]) == ["cancelled", "paid", "shipped"]
+    assert [s["name"] for s in props["series"]] == header[1:]
 
 
 async def test_the_session_is_read_only_and_literals_pass_through() -> None:
@@ -86,7 +89,9 @@ async def test_the_session_is_read_only_and_literals_pass_through() -> None:
     try:
         with pytest.raises(ToolError) as exc:
             await db.run("DELETE FROM demo_shop.refunds", max_rows=1, checked=False)
-        assert "read-only" in (exc.value.hint or "") or "can't read" in (exc.value.hint or "")
+        # Refused by the grants (1142) or the read-only session (1792): either
+        # way the hint tells the model this database only reads.
+        assert "read" in (exc.value.hint or "") and "fix the SQL" not in (exc.value.hint or "")
         res = await db.run("SELECT '12:30' AS t, 'a%b' AS p, 'x' LIKE '%x%' AS l", max_rows=1)
         assert res.rows == [["12:30", "a%b", 1]]
         with pytest.raises(ToolError) as exc:

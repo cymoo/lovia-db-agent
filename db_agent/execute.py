@@ -188,22 +188,30 @@ def _code(exc: sa_exc.DBAPIError) -> str:
 
     Hints key on codes, not messages: servers localize their messages.
     """
-    orig = exc.orig
-    state = getattr(orig, "sqlstate", None)
-    if state:
-        return str(state)
-    args = getattr(orig, "args", ())
-    return str(args[0]) if args and isinstance(args[0], int) else ""
+    # SQLAlchemy's adapter wraps the driver's error; asyncmy's number is on
+    # the original, its __cause__.
+    for err in (exc.orig, getattr(exc.orig, "__cause__", None)):
+        state = getattr(err, "sqlstate", None)
+        if state:
+            return str(state)
+        args = getattr(err, "args", ())
+        if args and isinstance(args[0], int):
+            return str(args[0])
+    return ""
 
 
 _NAMES = "check the names with search_schema / describe_tables; don't guess"
+_DENIED = (
+    "the account isn't allowed this: it may only read, and only what it was granted. "
+    "Don't retry — tell the user it isn't available"
+)
 _HINTS = {
     # PostgreSQL SQLSTATEs
     "42703": _NAMES,  # undefined column
     "42P01": _NAMES,  # undefined table
     "42883": "no such function (or wrong argument types) in this dialect; cast or use another",
     "57014": "the query took too long: filter more, narrow the time range, or aggregate first",
-    "42501": "this account can't read that; don't retry — tell the user it isn't available",
+    "42501": _DENIED,
     "25006": "this database is read-only: only SELECT queries run",
     "42601": "check the SQL against this database's dialect",
     "22012": "guard the divisor, e.g. NULLIF(x, 0)",
@@ -213,7 +221,7 @@ _HINTS = {
     "1146": _NAMES,  # table doesn't exist
     "1305": "no such function in this dialect; use another",
     "3024": "the query took too long: filter more, narrow the time range, or aggregate first",
-    "1142": "this account can't read that; don't retry — tell the user it isn't available",
+    "1142": _DENIED,  # command denied (also a write the grants don't allow)
     "1792": "this database is read-only: only SELECT queries run",
     "1064": "check the SQL against this database's dialect",
     "1055": "every selected column must be in GROUP BY or inside an aggregate",

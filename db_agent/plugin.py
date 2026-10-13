@@ -273,7 +273,8 @@ class SQLDatabase:
             pivot: Annotated[
                 dict[str, str] | None,
                 "Long → wide: {index, columns, values}; then give ONE series as a "
-                "template, repeated per category.",
+                "template, repeated per category in the order categories first "
+                "appear in the rows.",
             ] = None,
             database: Annotated[str | None, DB_ARG] = None,
         ) -> str:

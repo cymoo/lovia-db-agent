@@ -53,13 +53,20 @@ CREATE TABLE refunds (
     FOREIGN KEY (order_id) REFERENCES orders (id)
 ) COMMENT '退款';
 
+-- Pseudo-random numbers in [0, 1): CRC32(CONCAT(salt, key)) % 100000 / 100000.
+-- Deterministic, and unlike RAND(seed) — whose first value barely moves
+-- between consecutive seeds — uncorrelated from row to row.
+
 INSERT INTO customers
 WITH RECURSIVE n (i) AS (SELECT 1 UNION ALL SELECT i + 1 FROM n WHERE i < 400)
 SELECT i,
        CONCAT('customer ', i),
-       ELT(1 + FLOOR(RAND(i) * 6), '上海', '北京', '深圳', '杭州', '成都', '武汉'),
-       ELT(1 + FLOOR(RAND(i + 7) * 6), 'bronze', 'bronze', 'bronze', 'silver', 'silver', 'gold'),
-       TIMESTAMP('2024-01-01') + INTERVAL FLOOR(RAND(i + 13) * 700 * 86400) SECOND
+       ELT(1 + FLOOR(CRC32(CONCAT('city', i)) % 100000 / 100000 * 6),
+           '上海', '北京', '深圳', '杭州', '成都', '武汉'),
+       ELT(1 + FLOOR(CRC32(CONCAT('tier', i)) % 100000 / 100000 * 6),
+           'bronze', 'bronze', 'bronze', 'silver', 'silver', 'gold'),
+       TIMESTAMP('2024-01-01')
+         + INTERVAL FLOOR(CRC32(CONCAT('joined', i)) % 100000 / 100000 * 700 * 86400) SECOND
 FROM n;
 
 INSERT INTO products
@@ -68,21 +75,25 @@ SELECT i,
        CONCAT(ELT(1 + (i - 1) % 10, '手机', '耳机', '平板', '笔记本', '显示器', '键盘', '鼠标', '台灯', '书桌', '椅子'),
               ' ', CHAR(65 + (i - 1) DIV 10)),
        ELT(1 + (i - 1) % 10, '数码', '数码', '数码', '电脑', '电脑', '外设', '外设', '家居', '家居', '家居'),
-       ROUND(20 + RAND(i) * 3000, 2)
+       ROUND(20 + CRC32(CONCAT('price', i)) % 100000 / 100000 * 3000, 2)
 FROM n;
 
 INSERT INTO orders
 WITH RECURSIVE n (i) AS (SELECT 1 UNION ALL SELECT i + 1 FROM n WHERE i < 6000)
 SELECT i,
-       1 + FLOOR(RAND(i) * 400),
-       ELT(1 + FLOOR(RAND(i + 1) * 5), 'paid', 'shipped', 'shipped', 'shipped', 'cancelled'),
+       1 + FLOOR(CRC32(CONCAT('customer', i)) % 100000 / 100000 * 400),
+       ELT(1 + FLOOR(CRC32(CONCAT('status', i)) % 100000 / 100000 * 5),
+           'paid', 'shipped', 'shipped', 'shipped', 'cancelled'),
        -- Skewed so that later months have more orders.
-       TIMESTAMP('2025-01-01') + INTERVAL FLOOR(POW(RAND(i + 2), 0.8) * 650 * 86400) SECOND
+       TIMESTAMP('2025-01-01')
+         + INTERVAL FLOOR(POW(CRC32(CONCAT('day', i)) % 100000 / 100000, 0.8) * 650 * 86400) SECOND
 FROM n;
 
 -- One to three products per order.
 INSERT INTO order_items
-SELECT o.id, p.id, 1 + FLOOR(RAND(o.id * 61 + p.id) * 3), ROUND(p.price * (0.8 + RAND(o.id + p.id) * 0.2), 2)
+SELECT o.id, p.id,
+       1 + FLOOR(CRC32(CONCAT('qty', o.id, '-', p.id)) % 100000 / 100000 * 3),
+       ROUND(p.price * (0.8 + CRC32(CONCAT('deal', o.id, '-', p.id)) % 100000 / 100000 * 0.2), 2)
 FROM orders o
 JOIN products p ON p.id IN (1 + o.id % 60, 1 + (o.id * 7 + 3) % 60, 1 + (o.id * 13 + 5) % 60)
 WHERE p.id = 1 + o.id % 60
@@ -93,10 +104,11 @@ INSERT INTO refunds
 SELECT ROW_NUMBER() OVER (ORDER BY o.id),
        o.id,
        ROUND((SELECT SUM(quantity * unit_price) FROM order_items WHERE order_id = o.id) * 0.5, 2),
-       ELT(1 + FLOOR(RAND(o.id) * 4), '质量问题', '不想要了', '发错货', NULL),
+       ELT(1 + FLOOR(CRC32(CONCAT('reason', o.id)) % 100000 / 100000 * 4),
+           '质量问题', '不想要了', '发错货', NULL),
        o.created_at + INTERVAL 5 DAY
 FROM orders o
-WHERE o.status = 'shipped' AND RAND(o.id * 3) < 0.06;
+WHERE o.status = 'shipped' AND CRC32(CONCAT('refund', o.id)) % 100000 / 100000 < 0.06;
 
 ANALYZE TABLE customers, products, orders, order_items, refunds;
 
