@@ -10,6 +10,8 @@ dependencies = [
     "sqlalchemy[asyncio]>=2.0.30",
     "asyncpg>=0.29",
     "asyncmy>=0.2.9",
+    "cryptography>=42",  # MySQL 8's default auth (caching_sha2_password) needs it
+
     "sqlglot>=25",
     "pyyaml>=6",
     "python-dotenv>=1",
