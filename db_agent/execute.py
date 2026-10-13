@@ -188,16 +188,14 @@ def _code(exc: sa_exc.DBAPIError) -> str:
 
     Hints key on codes, not messages: servers localize their messages.
     """
-    # SQLAlchemy's adapter wraps the driver's error; asyncmy's number is on
-    # the original, its __cause__.
-    for err in (exc.orig, getattr(exc.orig, "__cause__", None)):
-        state = getattr(err, "sqlstate", None)
-        if state:
-            return str(state)
-        args = getattr(err, "args", ())
-        if args and isinstance(args[0], int):
-            return str(args[0])
-    return ""
+    orig = exc.orig
+    # MySQL errors carry (errno, message); check that first — a MySQL SQLSTATE
+    # is coarse (42000 covers syntax errors and denied commands alike).
+    args = getattr(orig, "args", ())
+    if args and isinstance(args[0], int):
+        return str(args[0])
+    state = getattr(orig, "sqlstate", None)
+    return str(state) if state else ""
 
 
 _NAMES = "check the names with search_schema / describe_tables; don't guess"
