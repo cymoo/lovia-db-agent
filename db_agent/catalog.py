@@ -210,8 +210,7 @@ async def describe(db: Database, table: Table, *, full: bool = True) -> str:
         return "\n".join(lines)
 
     try:
-        async with db.engine.connect() as conn:
-            info = await conn.run_sync(keys)
+        info = await db.reflect(keys, statements=3)
     except Exception:  # noqa: BLE001 - unreachable now; the sample will say so
         info = {}
     pk = (info.get("pk") or {}).get("constrained_columns") or []

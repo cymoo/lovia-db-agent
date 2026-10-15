@@ -29,7 +29,7 @@ from lovia.web import put_ui_data, ui_result, validate_chart_option
 from .catalog import CATALOG_TIMEOUT_S, SAMPLE_TIMEOUT_S, Catalog, describe, load_catalog
 from .charts import apply_pivot, check_encode, summarize
 from .config import Settings
-from .execute import DB_WAIT_S, Database
+from .execute import CLEANUP_S, Database, client_wait
 from .stats import column_stats
 
 __all__ = ["SQLDatabase"]
@@ -205,13 +205,15 @@ class SQLDatabase:
 
     def _build_tools(self) -> list[Tool]:
         limits = self.limits
-        # Backstops, each past the bounds of what the tool waits for.
-        statement = DB_WAIT_S + limits.statement_timeout_s
-        # The first load: the version, then tables and columns.
-        catalog = statement + 2 * (DB_WAIT_S + CATALOG_TIMEOUT_S)
+        # Backstops, each past the client-side limits of what the tool waits
+        # for (each call, plus dropping its connection should it hang).
+        stmt = limits.statement_timeout_s
+        statement = client_wait(stmt) + CLEANUP_S
+        # The first load: the version, then tables, then columns.
+        catalog = statement + 2 * (client_wait(CATALOG_TIMEOUT_S) + CLEANUP_S)
         # Past the budget only the table being described runs on: its keys
         # (three reflection queries) and its sample.
-        last_table = 3 * statement + DB_WAIT_S + SAMPLE_TIMEOUT_S
+        last_table = client_wait(stmt, 3) + client_wait(SAMPLE_TIMEOUT_S) + 2 * CLEANUP_S
         margin = 5
 
         async def search_schema(

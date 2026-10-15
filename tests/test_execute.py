@@ -5,7 +5,7 @@ from __future__ import annotations
 import pytest
 import sqlalchemy.exc as sa_exc
 
-from db_agent.execute import _code, _hint, _pg_time_zone
+from db_agent.execute import _code, _hint, _pg_time_zone, _unreachable
 
 
 class _MySQLError(Exception):
@@ -42,3 +42,14 @@ def test_unknown_errors_get_a_generic_hint() -> None:
 )
 def test_postgres_time_zone_offsets(iso: str, postgres: str) -> None:
     assert _pg_time_zone(iso) == postgres
+
+
+class _ConnectError(Exception):
+    sqlstate = "08006"
+
+
+def test_connection_failures_are_not_the_sqls_fault() -> None:
+    refused = sa_exc.OperationalError("…", None, _MySQLError(2003, "Can't connect to MySQL"))
+    gone = sa_exc.OperationalError("…", None, _ConnectError("connection failure"))
+    syntax = sa_exc.ProgrammingError("…", None, _MySQLError(1064, "You have an error"))
+    assert _unreachable(refused) and _unreachable(gone) and not _unreachable(syntax)

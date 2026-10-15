@@ -9,8 +9,10 @@ check what the model and the page would actually receive.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import os
+import time
 from pathlib import Path
 from typing import Any
 
@@ -21,8 +23,9 @@ from lovia.testing import ScriptedProvider, call, text
 from lovia.transcript import ToolResultEntry
 from lovia.web.components import UI_DATA_SINK
 from lovia.web.store import ChatStore
+from sqlalchemy.engine import make_url
 
-from db_agent import plugin
+from db_agent import execute, plugin
 from db_agent.app import build_agent, build_app
 from db_agent.config import Connection, Limits, Settings
 from db_agent.execute import Database
@@ -307,6 +310,64 @@ async def test_our_own_time_limits_stay_with_their_statement() -> None:
         assert (await db.run("SHOW statement_timeout", max_rows=1)).rows == [["1s"]]
     finally:
         await db.aclose()
+
+
+class _Proxy:
+    """Forwards to the test database; while ``stalled``, passes nothing on —
+    a connection that stops answering, which no server-side limit ends."""
+
+    def __init__(self) -> None:
+        self.stalled = False
+
+    async def start(self) -> int:
+        self._server = await asyncio.start_server(self._accept, "127.0.0.1", 0)
+        return int(self._server.sockets[0].getsockname()[1])
+
+    async def _accept(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+        url = make_url(os.environ[URL_ENV])
+        up_reader, up_writer = await asyncio.open_connection(url.host, url.port or 5432)
+        asyncio.ensure_future(self._pipe(reader, up_writer))
+        asyncio.ensure_future(self._pipe(up_reader, writer))
+
+    async def _pipe(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+        try:
+            while data := await reader.read(65536):
+                while self.stalled:
+                    await asyncio.sleep(0.05)
+                writer.write(data)
+                await writer.drain()
+        except OSError:
+            pass
+        finally:
+            writer.close()
+
+    def close(self) -> None:
+        self._server.close()
+
+
+async def test_a_connection_that_stops_answering_is_given_up(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(execute, "DB_WAIT_S", 0)
+    monkeypatch.setattr(execute, "GRACE_S", 0.5)
+    proxy = _Proxy()
+    port = await proxy.start()
+    url = make_url(os.environ[URL_ENV]).set(host="127.0.0.1", port=port)
+    monkeypatch.setenv("DB_AGENT_PROXY_URL", url.render_as_string(hide_password=False))
+    db = Database("shop", Connection(url_env="DB_AGENT_PROXY_URL"), Limits(statement_timeout_s=1))
+    try:
+        assert (await db.run("SELECT 1 AS n", max_rows=1)).rows == [[1]]
+        proxy.stalled = True
+        start = time.monotonic()
+        with pytest.raises(ToolError, match="unreachable or busy") as exc:
+            await db.run("SELECT 2 AS n", max_rows=1)
+        # The client's limit (1.5 s), then dropping the connection (≤ 2 s).
+        assert time.monotonic() - start < 5 and "retry" in (exc.value.hint or "")
+        proxy.stalled = False
+        assert (await db.run("SELECT 3 AS n", max_rows=1)).rows == [[3]]  # a fresh connection
+    finally:
+        await db.aclose()
+        proxy.close()
 
 
 async def test_describe_skips_samples_out_of_time(

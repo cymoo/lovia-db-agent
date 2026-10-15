@@ -45,6 +45,11 @@ from db_agent.convert import MAX_CELL_CHARS, parse_tz, to_json
         (Range("2026-01-01", "2026-02-01"), "[2026-01-01,2026-02-01)"),
         (Range(1, None), "[1,)"),
         (Range(empty=True), "empty"),
+        # Bounds as written: rounded, these two would print alike.
+        (
+            Range(Decimal("1.23456789012345678"), Decimal("1.23456789012345679")),
+            "[1.23456789012345678,1.23456789012345679)",
+        ),
     ],
 )
 def test_to_json(value: object, expected: object) -> None:

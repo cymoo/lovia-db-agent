@@ -82,7 +82,9 @@ def _range(r: Range) -> str:
         return "empty"
 
     def bound(v: Any) -> str:
-        return "" if v is None else str(to_json(v))
+        # As written, not through to_json: the range is text already, and a
+        # Decimal bound rounded to a double could make it read empty.
+        return "" if v is None else str(v)
 
     return (
         ("[" if r.lower_inc else "(")

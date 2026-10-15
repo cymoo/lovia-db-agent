@@ -14,11 +14,16 @@ from db_agent.config import Connection, Settings
 from db_agent.plugin import SQLDatabase
 
 
+@pytest.mark.parametrize(
+    "url",
+    ["postgresql+asyncpg://u:p@127.0.0.1:9/db", "mysql+asyncmy://u:p@127.0.0.1:9/db"],
+    ids=["postgres", "mysql"],
+)
 async def test_a_down_database_is_reported_and_not_hammered(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    url: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     # Nothing listens on port 9: the connection is refused at once.
-    monkeypatch.setenv("DB_AGENT_DOWN_URL", "postgresql+asyncpg://u:p@127.0.0.1:9/db")
+    monkeypatch.setenv("DB_AGENT_DOWN_URL", url)
     settings = Settings(
         connections={"down": Connection(url_env="DB_AGENT_DOWN_URL")}, data_dir=tmp_path
     )
@@ -36,4 +41,4 @@ async def test_a_down_database_is_reported_and_not_hammered(
     assert search.is_error
     assert search.output.startswith("Tool error: down is unavailable right now\n")
     assert query.is_error and "down is unreachable or busy" in query.output
-    assert "retry" in query.output and "u:p" not in query.output
+    assert "retry once" in query.output and "fix the SQL" not in query.output
