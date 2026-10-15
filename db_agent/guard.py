@@ -19,9 +19,7 @@ from lovia import ToolError
 from sqlglot import exp
 from sqlglot.errors import SqlglotError
 
-__all__ = ["Dialect", "prepare"]
-
-Dialect = str  # "postgres" | "mysql" — sqlglot's names
+__all__ = ["prepare"]
 
 # sqlglot logs a warning for every statement it falls back to parsing as an
 # opaque Command (EXPLAIN, among others); we handle those ourselves.
@@ -71,8 +69,10 @@ _EXPLAIN_OPTS = re.compile(
 _HINT_ONE = "send one read-only statement: SELECT / WITH … SELECT / EXPLAIN / SHOW"
 
 
-def prepare(sql: str, dialect: Dialect, limit: int | None) -> str:
+def prepare(sql: str, dialect: str, limit: int | None) -> str:
     """The statement to run, its outermost LIMIT capped at ``limit``.
+
+    ``dialect`` is sqlglot's name for it (:attr:`Dialect.name`).
 
     Raise :class:`ToolError` (with a hint) unless ``sql`` is exactly one
     read-only statement. EXPLAIN and SHOW pass through unchanged.

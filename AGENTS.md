@@ -24,7 +24,8 @@ Paths are relative to the repository root. Start with the relevant entry points 
 | Startup, configuration, agent assembly | `db_agent/__main__.py`, `db_agent/config.py`, `db_agent/app.py` |
 | Tool interfaces, prompts, result envelopes | `SQLDatabase` in `db_agent/plugin.py` |
 | Schema discovery, search, descriptions | `db_agent/catalog.py` |
-| SQL checks, execution, pools, database differences | `db_agent/guard.py`, `db_agent/execute.py` |
+| SQL checks, execution, pools | `db_agent/guard.py`, `db_agent/execute.py` |
+| Database differences: session setup, timeouts, catalog SQL, error hints, prompt notes | `Dialect` in `db_agent/dialects.py`; other modules never branch on the dialect |
 | Data conversion, chart pivots, result statistics | `db_agent/convert.py`, `db_agent/charts.py`, `db_agent/stats.py` |
 | Page customization and image-source CSP | `db_agent/templates/index.html`; lovia provides the page and components, with no separate frontend build |
 

@@ -24,14 +24,15 @@ from dataclasses import dataclass
 from typing import Any
 
 import sqlalchemy.exc as sa_exc
-from lovia import ToolError, UserError
+from lovia import ToolError
 from sqlalchemy import bindparam, event, text
 from sqlalchemy.engine import make_url
 from sqlalchemy.ext.asyncio import AsyncConnection, AsyncEngine, create_async_engine
 
-from . import guard, pgtypes
+from . import guard
 from .config import Connection, Limits
 from .convert import to_json
+from .dialects import Dialect, for_backend
 
 __all__ = ["CLEANUP_S", "Database", "QueryResult", "client_wait"]
 
@@ -45,11 +46,6 @@ GRACE_S = 3
 """How much longer than the server's limit the client waits for its answer."""
 CLEANUP_S = 2
 """What closing a connection that stopped answering takes (SQLAlchemy's limit)."""
-
-_SYSTEM_SCHEMAS = {
-    "postgres": ("pg_catalog", "information_schema"),
-    "mysql": ("mysql", "sys", "information_schema", "performance_schema"),
-}
 
 
 @dataclass
@@ -70,13 +66,7 @@ class Database:
         self.config = connection
         self.limits = limits
         url = make_url(connection.url())
-        backend = url.get_backend_name()
-        if backend not in ("postgresql", "mysql", "mariadb"):
-            raise UserError(
-                f"{name}: unsupported database {backend!r}",
-                hint="use a postgresql+asyncpg:// or mysql+asyncmy:// URL",
-            )
-        self.dialect: guard.Dialect = "postgres" if backend == "postgresql" else "mysql"
+        self.dialect: Dialect = for_backend(url.get_backend_name(), name)
         self._url = url
         self._engine: AsyncEngine | None = None
         self.version = ""
@@ -84,20 +74,15 @@ class Database:
     @property
     def label(self) -> str:
         """What the model reads: "PostgreSQL 16.4" / "MySQL 8.0.36"."""
-        kind = "PostgreSQL" if self.dialect == "postgres" else "MySQL"
-        return f"{kind} {self.version}".strip()
+        return f"{self.dialect.display} {self.version}".strip()
 
     def default_schemas(self) -> list[str] | None:
         """The schemas to discover; None means every non-system one."""
         if self.config.schemas is not None:
             return self.config.schemas
-        if self.dialect == "mysql" and self._url.database:
+        if self.dialect.schema_is_database and self._url.database:
             return [self._url.database]
         return None
-
-    @property
-    def system_schemas(self) -> tuple[str, ...]:
-        return _SYSTEM_SCHEMAS[self.dialect]
 
     @property
     def engine(self) -> AsyncEngine:
@@ -109,30 +94,21 @@ class Database:
                 pool_pre_ping=True,
                 pool_recycle=1800,
                 pool_timeout=POOL_TIMEOUT_S,
-                connect_args=self._session_args(),
+                connect_args=self.dialect.session_args(
+                    _ms_of(self.limits.statement_timeout_s),
+                    self.config.timezone,
+                    CONNECT_TIMEOUT_S,
+                ),
             )
-            if self.dialect == "postgres":
+            hook = self.dialect.on_connect
+            if hook is not None:
 
                 @event.listens_for(engine.sync_engine, "connect")
-                def _codecs(dbapi_conn: Any, _record: Any) -> None:
-                    dbapi_conn.run_async(pgtypes.register)
+                def _on_connect(dbapi_conn: Any, _record: Any) -> None:
+                    dbapi_conn.run_async(hook)
 
             self._engine = engine
         return self._engine
-
-    def _session_args(self) -> dict[str, Any]:
-        ms = _ms_of(self.limits.statement_timeout_s)
-        tz = self.config.timezone
-        if self.dialect == "postgres":
-            settings = {"default_transaction_read_only": "on", "statement_timeout": str(ms)}
-            if tz:
-                settings["TimeZone"] = _pg_time_zone(tz)
-            return {"server_settings": settings, "timeout": CONNECT_TIMEOUT_S}
-        # One SET statement: init_command runs without multi-statement support.
-        sets = ["SESSION transaction_read_only = 1", f"SESSION max_execution_time = {ms}"]
-        if tz:
-            sets.append(f"time_zone = '{tz}'")  # validated in config.py
-        return {"init_command": "SET " + ", ".join(sets), "connect_timeout": CONNECT_TIMEOUT_S}
 
     def quote(self, *parts: str) -> str:
         """A qualified identifier in this dialect's quoting."""
@@ -153,7 +129,7 @@ class Database:
         were more. ``timeout_s`` replaces the statement timeout for one of our
         own SELECTs. Any failure becomes a :class:`ToolError` with a hint.
         """
-        stmt = guard.prepare(sql, self.dialect, max_rows + 1) if checked else sql
+        stmt = guard.prepare(sql, self.dialect.name, max_rows + 1) if checked else sql
         start = time.perf_counter()
 
         async def go() -> QueryResult:
@@ -212,19 +188,16 @@ class Database:
 
     async def _bound(self, conn: AsyncConnection, sql: str, timeout_s: float | None) -> str:
         """Give one statement of ours its own time limit, longer or shorter
-        than the session's: PostgreSQL by ``SET LOCAL`` (undone when the
-        connection returns to the pool), MySQL by an optimizer hint."""
+        than the session's (see :attr:`Dialect.bound`)."""
         if timeout_s is None:
             return sql
-        ms = _ms_of(timeout_s)
-        if self.dialect == "postgres":
-            await conn.exec_driver_sql(f"SET LOCAL statement_timeout = {ms}")
-            return sql
-        return _SELECT.sub(rf"\g<0> /*+ MAX_EXECUTION_TIME({ms}) */", sql, count=1)
+        first, sql = self.dialect.bound(sql, _ms_of(timeout_s))
+        if first is not None:
+            await conn.exec_driver_sql(first)
+        return sql
 
     async def load_version(self) -> str:
-        sql = "SHOW server_version" if self.dialect == "postgres" else "SELECT VERSION()"
-        rows = await self.fetch(sql)
+        rows = await self.fetch(self.dialect.version_sql)
         self.version = str(rows[0][0]).split()[0] if rows else ""
         return self.version
 
@@ -234,9 +207,9 @@ class Database:
             self._engine = None
 
     def _tool_error(self, exc: Exception) -> ToolError:
-        if isinstance(exc, sa_exc.DBAPIError) and not _unreachable(exc):
+        if isinstance(exc, sa_exc.DBAPIError) and not _unreachable(exc, self.dialect):
             message = self._scrub(_message(exc))
-            return ToolError(f"{self.name}: {message}", hint=_hint(_code(exc)))
+            return ToolError(f"{self.name}: {message}", hint=self.dialect.hint(_code(exc)))
         if isinstance(exc, (sa_exc.DBAPIError, sa_exc.TimeoutError, OSError, asyncio.TimeoutError)):
             # A lost connection, no pool slot, a refused or slow connect, no answer.
             message = f"{self.name} is unreachable or busy: {type(exc).__name__}"
@@ -257,7 +230,6 @@ class Database:
         return message
 
 
-_SELECT = re.compile(r"^\s*SELECT\b", re.I)
 _RETRY = "retry once shortly; if it keeps failing, tell the user"
 
 
@@ -279,29 +251,9 @@ def client_wait(statement_s: float, statements: int = 1) -> float:
     return DB_WAIT_S + statements * statement_s + GRACE_S
 
 
-def _unreachable(exc: sa_exc.DBAPIError) -> bool:
+def _unreachable(exc: sa_exc.DBAPIError, dialect: Dialect) -> bool:
     """A failure of the connection, not of the statement: no SQL fixes it."""
-    code = _code(exc)
-    return exc.connection_invalidated or code in _CONNECTION_CODES or code.startswith("08")
-
-
-# MySQL client and server errors about the connection itself (PostgreSQL's
-# are SQLSTATE class 08, plus the shutdown and overload states below).
-_CONNECTION_CODES = frozenset(
-    {
-        "1040",  # too many connections
-        "1053",  # server shutdown in progress
-        "2002",  # can't connect through the socket
-        "2003",  # can't connect to the server
-        "2005",  # unknown host
-        "2006",  # server has gone away
-        "2013",  # lost connection during query
-        "57P01",  # admin shutdown
-        "57P02",  # crash shutdown
-        "57P03",  # cannot connect now
-        "53300",  # too many connections
-    }
-)
+    return exc.connection_invalidated or _code(exc) in dialect.connection_codes
 
 
 def _code(exc: sa_exc.DBAPIError) -> str:
@@ -317,51 +269,6 @@ def _code(exc: sa_exc.DBAPIError) -> str:
         return str(args[0])
     state = getattr(orig, "sqlstate", None)
     return str(state) if state else ""
-
-
-_NAMES = "check the names with search_schema / describe_tables; don't guess"
-_DENIED = (
-    "the account isn't allowed this: it may only read, and only what it was granted. "
-    "Don't retry — tell the user it isn't available"
-)
-_HINTS = {
-    # PostgreSQL SQLSTATEs
-    "42703": _NAMES,  # undefined column
-    "42P01": _NAMES,  # undefined table
-    "42883": "no such function (or wrong argument types) in this dialect; cast or use another",
-    "57014": "the query took too long: filter more, narrow the time range, or aggregate first",
-    "42501": _DENIED,
-    "25006": "this database is read-only: only SELECT queries run",
-    "42601": "check the SQL against this database's dialect",
-    "22012": "guard the divisor, e.g. NULLIF(x, 0)",
-    "42803": "every selected column must be in GROUP BY or inside an aggregate",
-    # MySQL error numbers
-    "1054": _NAMES,  # unknown column
-    "1146": _NAMES,  # table doesn't exist
-    "1305": "no such function in this dialect; use another",
-    "3024": "the query took too long: filter more, narrow the time range, or aggregate first",
-    "1142": _DENIED,  # command denied (also a write the grants don't allow)
-    "1792": "this database is read-only: only SELECT queries run",
-    "1064": "check the SQL against this database's dialect",
-    "1055": "every selected column must be in GROUP BY or inside an aggregate",
-}
-
-
-def _hint(code: str) -> str:
-    return _HINTS.get(code, "fix the SQL and try again")
-
-
-def _pg_time_zone(tz: str) -> str:
-    """An ISO offset as PostgreSQL means it: it reads ``+08:00`` POSIX-style,
-    as eight hours *west* of UTC, so east must be spelled ``UTC-08:00``."""
-    m = _OFFSET.fullmatch(tz)
-    if not m:
-        return tz  # a zone name
-    sign = "-" if m.group(1) == "+" else "+"
-    return f"UTC{sign}{m.group(2)}:{m.group(3)}"
-
-
-_OFFSET = re.compile(r"([+-])(\d{1,2}):?(\d{2})")
 
 
 def _ms(start: float) -> int:
