@@ -29,6 +29,7 @@ from lovia.web import put_ui_data, ui_result, validate_chart_option
 from .catalog import CATALOG_TIMEOUT_S, SAMPLE_TIMEOUT_S, Catalog, describe, load_catalog
 from .charts import apply_pivot, check_encode, summarize
 from .config import Settings
+from .convert import cell_text
 from .execute import CLEANUP_S, Database, client_wait
 from .stats import column_stats
 
@@ -40,6 +41,7 @@ logger = logging.getLogger(__name__)
 # envelope is broken JSON, so the tools size their own output.
 OUTPUT_CHARS = 60_000
 QUERY_OUTPUT_CHARS = 20_000
+QUERY_CELL_CHARS = 200
 CATALOG_TTL_S = 600
 """After this a catalog is reloaded in the background; tools keep using the old one."""
 DOWN_RETRY_S = 30
@@ -50,13 +52,6 @@ DESCRIBE_BUDGET_S = 30
 # Module-level: the tools are closures, and lovia resolves their (string)
 # annotations against this module's globals.
 DB_ARG = "The database's name; omit when there is only one."
-
-_DIALECT_NOTES = {
-    "postgres": "PostgreSQL — date_trunc('month', t), to_char(t, 'YYYY-MM'), ILIKE, "
-    '"double quotes" for identifiers, x::numeric casts',
-    "mysql": "MySQL — DATE_FORMAT(t, '%Y-%m'), DATE(t), `backticks` for identifiers, "
-    "LIMIT n OFFSET m, SHOW for server facts",
-}
 
 _WORKFLOW = """\
 How to work:
@@ -178,8 +173,9 @@ class SQLDatabase:
             about = f": {db.config.description}" if db.config.description else ""
             lines.append(f"- {db.name} ({'; '.join(facts)}){about}")
             lines.append(f"  {cat.overview(budget)}")
-        dialects = sorted({db.dialect for db in self.databases.values()})
-        lines += ["", _WORKFLOW, "Dialect notes: " + "; ".join(_DIALECT_NOTES[d] for d in dialects)]
+        dialects = {db.dialect.name: db.dialect for db in self.databases.values()}
+        notes = "; ".join(dialects[d].notes for d in sorted(dialects))
+        lines += ["", _WORKFLOW, "Dialect notes: " + notes]
         return "\n".join(lines), complete
 
     def __len__(self) -> int:
@@ -413,22 +409,11 @@ def _fit_preview(props: dict[str, Any], preview_rows: int) -> dict[str, Any]:
 
 
 def _tsv(columns: list[str], rows: list[list[Any]], *, more: bool, budget: int) -> str:
-    def cell(v: Any) -> str:
-        s = (
-            ""
-            if v is None
-            else json.dumps(v, ensure_ascii=False)
-            if isinstance(v, (dict, list))
-            else str(v)
-        )
-        s = s.replace("\t", " ").replace("\n", " ")
-        return s if len(s) <= 200 else s[:199] + "…"
-
     lines = ["\t".join(columns)]
     used = len(lines[0])
     shown = 0
     for r in rows:
-        line = "\t".join(cell(v) for v in r)
+        line = "\t".join(cell_text(v, QUERY_CELL_CHARS) for v in r)
         if used + len(line) + 1 > budget:
             break
         lines.append(line)

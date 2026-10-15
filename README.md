@@ -37,6 +37,7 @@ cp .env.example .env                       # set LOVIA_MODEL (+ API key) and DB_
 
 Try: "每个月的销售额走势", "退款最多的商品 Top 10", "最近的订单".
 MySQL: `mysql -u root < examples/demo_mysql.sql` and a `mysql+asyncmy://` URL.
+MariaDB is not supported: it lacks `max_execution_time`, which bounds every query.
 
 ## Configuration
 

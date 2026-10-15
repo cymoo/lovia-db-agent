@@ -19,7 +19,7 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from asyncpg import Range, Record
 
-__all__ = ["MAX_CELL_CHARS", "parse_tz", "to_json"]
+__all__ = ["MAX_CELL_CHARS", "cell_text", "clip", "parse_tz", "to_json"]
 
 MAX_CELL_CHARS = 500
 _SAFE_INT = 2**53
@@ -46,7 +46,7 @@ def to_json(v: Any) -> Any:
             return str(v)
         return float(f"{v:.{_DOUBLE_DIGITS}g}")
     if isinstance(v, str):
-        return _clip(v)
+        return clip(v, MAX_CELL_CHARS)
     if isinstance(v, (dt.datetime, dt.date, dt.time)):
         return v.isoformat()
     if isinstance(v, dt.timedelta):
@@ -59,7 +59,21 @@ def to_json(v: Any) -> Any:
         return _clip_json([to_json(x) for x in v])
     if isinstance(v, Range):
         return _range(v)
-    return _clip(str(v))  # UUID, IP addresses, enums, …
+    return clip(str(v), MAX_CELL_CHARS)  # UUID, IP addresses, enums, …
+
+
+def clip(s: str, n: int) -> str:
+    """``s`` cut to at most ``n`` characters, the last an ellipsis."""
+    return s if len(s) <= n else s[: n - 1] + "…"
+
+
+def cell_text(v: Any, n: int) -> str:
+    """A JSON-safe cell (see :func:`to_json`) as one line of text for the
+    model, at most ``n`` characters: tabs and line breaks become spaces."""
+    if v is None:
+        return ""
+    s = json.dumps(v, ensure_ascii=False) if isinstance(v, (dict, list)) else str(v)
+    return clip(s.replace("\t", " ").replace("\r", " ").replace("\n", " "), n)
 
 
 def parse_tz(name: str | None) -> dt.tzinfo | None:
@@ -93,13 +107,9 @@ def _range(r: Range) -> str:
     )
 
 
-def _clip(s: str) -> str:
-    return s if len(s) <= MAX_CELL_CHARS else s[: MAX_CELL_CHARS - 1] + "…"
-
-
 def _clip_json(v: Any) -> Any:
     text = json.dumps(v, ensure_ascii=False)
-    return v if len(text) <= MAX_CELL_CHARS else _clip(text)
+    return v if len(text) <= MAX_CELL_CHARS else clip(text, MAX_CELL_CHARS)
 
 
 def _size(n: int) -> str:

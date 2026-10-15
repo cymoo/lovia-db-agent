@@ -17,6 +17,7 @@ from typing import Any
 from lovia import ToolError
 from sqlalchemy import inspect
 
+from .convert import cell_text, clip
 from .execute import Database
 
 __all__ = [
@@ -31,6 +32,7 @@ __all__ = [
 
 COMMENT_CHARS = 60
 SAMPLE_ROWS = 3
+SAMPLE_CELL_CHARS = 60
 CATALOG_TIMEOUT_S = 60
 """Reading information_schema on a big MySQL can outlast the statement timeout."""
 SAMPLE_TIMEOUT_S = 3
@@ -116,7 +118,7 @@ class Catalog:
         """
 
         def line(t: Table) -> str:
-            note = _clip(t.comment, COMMENT_CHARS)
+            note = clip(" ".join(t.comment.split()), COMMENT_CHARS)
             return f"{t.qualified}" + (f" ({note})" if note else "")
 
         def size(s: str) -> int:
@@ -145,33 +147,29 @@ class Catalog:
 
 async def load_catalog(db: Database) -> Catalog:
     """Every table and column the account can read, in the configured schemas."""
+    dialect = db.dialect
     schemas = db.default_schemas()
-    if db.dialect == "postgres":
-        tables_sql, columns_sql = _PG_TABLES, _PG_COLUMNS
-    else:
-        tables_sql, columns_sql = _MYSQL_TABLES, _MYSQL_COLUMNS
-    filt = " AND {col} IN :schemas" if schemas else ""
-    params: dict[str, Any] = {"system": list(db.system_schemas)}
+    filt = f" AND {dialect.schema_column} IN :schemas" if schemas else ""
+    params: dict[str, Any] = {"system": list(dialect.system_schemas)}
     if schemas:
         params["schemas"] = list(schemas)
 
-    async def rows(sql: str, col: str) -> Sequence[Any]:
+    async def rows(sql: str) -> Sequence[Any]:
         return await db.fetch(
-            sql.replace("{filter}", filt.format(col=col)),
+            sql.replace("{filter}", filt),
             params,
             expanding=params.keys(),
             timeout_s=CATALOG_TIMEOUT_S,
         )
 
-    schema_col = "n.nspname" if db.dialect == "postgres" else "TABLE_SCHEMA"
     by_key: dict[tuple[str, str], Table] = {}
-    for schema, name, kind, comment, est in await rows(tables_sql, schema_col):
+    for schema, name, kind, comment, est in await rows(dialect.tables_sql):
         if _excluded(db, schema, name):
             continue
         comment = "" if comment in (None, "VIEW") else str(comment)
         est_rows = int(est) if est is not None and int(est) >= 0 else None
         by_key[(schema, name)] = Table(schema, name, kind, comment, est_rows)
-    for schema, name, col, typ, nullable, comment in await rows(columns_sql, schema_col):
+    for schema, name, col, typ, nullable, comment in await rows(dialect.columns_sql):
         t = by_key.get((schema, name))
         if t is not None:
             t.columns.append(Column(col, str(typ), bool(nullable), str(comment or "")))
@@ -241,7 +239,7 @@ async def describe(db: Database, table: Table, *, full: bool = True) -> str:
         if rows.rows:
             lines.append("sample rows:")
             lines.append("\t".join(rows.columns))
-            lines.extend("\t".join(_cell(v) for v in r) for r in rows.rows)
+            lines.extend("\t".join(cell_text(v, SAMPLE_CELL_CHARS) for v in r) for r in rows.rows)
     return "\n".join(lines)
 
 
@@ -250,52 +248,3 @@ def _excluded(db: Database, schema: str, name: str) -> bool:
         fnmatch.fnmatchcase(name, p) or fnmatch.fnmatchcase(f"{schema}.{name}", p)
         for p in db.config.exclude_tables
     )
-
-
-def _clip(s: str, n: int) -> str:
-    s = " ".join(s.split())
-    return s if len(s) <= n else s[: n - 1] + "…"
-
-
-def _cell(v: Any) -> str:
-    return "" if v is None else _clip(str(v), 60)
-
-
-# PostgreSQL: readable tables, views and materialized views; partitions roll up
-# into their parent.
-_PG_TABLES = """
-SELECT n.nspname, c.relname,
-       CASE WHEN c.relkind IN ('v', 'm') THEN 'view' ELSE 'table' END,
-       obj_description(c.oid, 'pg_class'),
-       CASE WHEN c.reltuples < 0 THEN NULL ELSE c.reltuples::bigint END
-FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
-WHERE c.relkind IN ('r', 'p', 'v', 'm', 'f') AND NOT c.relispartition
-  AND n.nspname NOT IN :system AND n.nspname NOT LIKE 'pg\\_toast%'
-  AND has_table_privilege(c.oid, 'SELECT'){filter}
-"""
-_PG_COLUMNS = """
-SELECT n.nspname, c.relname, a.attname, format_type(a.atttypid, a.atttypmod),
-       NOT a.attnotnull, col_description(c.oid, a.attnum)
-FROM pg_attribute a
-JOIN pg_class c ON c.oid = a.attrelid
-JOIN pg_namespace n ON n.oid = c.relnamespace
-WHERE a.attnum > 0 AND NOT a.attisdropped
-  AND c.relkind IN ('r', 'p', 'v', 'm', 'f') AND NOT c.relispartition
-  AND n.nspname NOT IN :system AND n.nspname NOT LIKE 'pg\\_toast%'
-  AND has_table_privilege(c.oid, 'SELECT'){filter}
-ORDER BY n.nspname, c.relname, a.attnum
-"""
-_MYSQL_TABLES = """
-SELECT TABLE_SCHEMA, TABLE_NAME,
-       CASE WHEN TABLE_TYPE = 'VIEW' THEN 'view' ELSE 'table' END,
-       TABLE_COMMENT, TABLE_ROWS
-FROM information_schema.TABLES
-WHERE TABLE_SCHEMA NOT IN :system{filter}
-"""
-_MYSQL_COLUMNS = """
-SELECT TABLE_SCHEMA, TABLE_NAME, COLUMN_NAME, COLUMN_TYPE,
-       IS_NULLABLE = 'YES', COLUMN_COMMENT
-FROM information_schema.COLUMNS
-WHERE TABLE_SCHEMA NOT IN :system{filter}
-ORDER BY TABLE_SCHEMA, TABLE_NAME, ORDINAL_POSITION
-"""

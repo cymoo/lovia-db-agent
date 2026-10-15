@@ -10,7 +10,7 @@ from decimal import Decimal
 import pytest
 from asyncpg import Range
 
-from db_agent.convert import MAX_CELL_CHARS, parse_tz, to_json
+from db_agent.convert import MAX_CELL_CHARS, cell_text, parse_tz, to_json
 
 
 @pytest.mark.parametrize(
@@ -67,3 +67,10 @@ def test_time_zones_by_name_or_offset() -> None:
 def test_long_text_is_clipped() -> None:
     out = to_json("x" * 2000)
     assert len(out) == MAX_CELL_CHARS and out.endswith("…")
+
+
+def test_cells_as_one_line_of_text() -> None:
+    assert cell_text(None, 10) == ""
+    assert cell_text("a\tb\r\nc  d", 20) == "a b  c  d"
+    assert cell_text({"k": "值"}, 20) == '{"k": "值"}'
+    assert cell_text(1234567, 4) == "123…"
