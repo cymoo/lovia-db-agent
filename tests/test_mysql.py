@@ -53,7 +53,7 @@ async def test_catalog_search_and_describe(tmp_path: Path) -> None:
     assert "primary key: (id)" in describe.output and "sample rows:" in describe.output
 
 
-async def test_tables_and_a_pivoted_chart(tmp_path: Path) -> None:
+async def test_a_table_and_a_split_chart(tmp_path: Path) -> None:
     sql = (
         "SELECT DATE_FORMAT(created_at, '%Y-%m') AS month, status, COUNT(*) AS n "
         "FROM demo_shop.orders WHERE created_at < '2025-04-01' GROUP BY 1, 2 ORDER BY 1, 2"
@@ -68,8 +68,12 @@ async def test_tables_and_a_pivoted_chart(tmp_path: Path) -> None:
             "query_chart",
             {
                 "sql": sql,
-                "option": {"xAxis": {"type": "category"}, "yAxis": {}, "series": [{"type": "bar"}]},
-                "pivot": {"index": "month", "columns": "status", "values": "n"},
+                "option": {
+                    "xAxis": {"type": "category"},
+                    "yAxis": {},
+                    "series": [{"type": "bar", "encode": {"x": "month", "y": "n"}}],
+                },
+                "split_by": "status",
             },
         ),
     )

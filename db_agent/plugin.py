@@ -27,7 +27,7 @@ from lovia.tools.base import Tool
 from lovia.web import put_ui_data, ui_result, validate_chart_option
 
 from .catalog import CATALOG_TIMEOUT_S, SAMPLE_TIMEOUT_S, Catalog, describe, load_catalog
-from .charts import apply_pivot, check_encode, summarize
+from .charts import apply_split, check_encode, summarize
 from .config import Settings
 from .convert import cell_text
 from .execute import CLEANUP_S, Database, client_wait
@@ -325,11 +325,10 @@ class SQLDatabase:
                 "An ECharts option WITHOUT data or dataset; series map result "
                 "columns by name via encode.",
             ],
-            pivot: Annotated[
-                dict[str, str] | None,
-                "Long → wide: {index, columns, values}; then give ONE series as a "
-                "template, repeated per category in the order categories first "
-                "appear in the rows.",
+            split_by: Annotated[
+                str | None,
+                "A category column: one series per value, from ONE series template "
+                "whose encode names x and y.",
             ] = None,
             database: Annotated[str | None, DB_ARG] = None,
         ) -> str:
@@ -340,9 +339,11 @@ class SQLDatabase:
             {"title": {"text": "Monthly revenue"}, "tooltip": {"trigger": "axis"},
              "xAxis": {"type": "category"}, "yAxis": {},
              "series": [{"type": "line", "encode": {"x": "month", "y": "revenue"}}]}
-            One line per category from `SELECT month, category, revenue …`: pass
-            pivot={"index": "month", "columns": "category", "values": "revenue"}
-            and "series": [{"type": "line"}].
+            Several measures: one series per column, e.g. a second series with
+            encode {"x": "month", "y": "orders"}.
+            One line per category from `SELECT month, category, revenue …`
+            (one row per month and category): split_by="category" with
+            "series": [{"type": "line", "encode": {"x": "month", "y": "revenue"}}].
             Pie: "series": [{"type": "pie", "encode": {"itemName": "category", "value": "revenue"}}]
             Bar ranking: "yAxis": {"type": "category"}, "xAxis": {}, encode {"y": name, "x": value}.
             """
@@ -363,9 +364,9 @@ class SQLDatabase:
                     "the query returned no rows", hint="check the filters, e.g. the date range"
                 )
             columns, rows = res.columns, res.rows
-            if pivot:
-                option, columns, rows = apply_pivot(
-                    option, columns, rows, pivot, max_series=limits.chart_max_series
+            if split_by:
+                option, columns, rows = apply_split(
+                    option, columns, rows, split_by, max_series=limits.chart_max_series
                 )
             check_encode(option, columns)
             full = {**option, "dataset": {"source": [columns, *rows]}}

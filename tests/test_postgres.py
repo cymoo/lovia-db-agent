@@ -159,9 +159,10 @@ async def test_a_small_chart_carries_its_data(tmp_path: Path) -> None:
     assert sum(r[1] for r in env["props"]["dataset"]["source"][1:]) == 6000
 
 
-async def test_a_pivoted_chart(tmp_path: Path) -> None:
+async def test_a_chart_split_by_category(tmp_path: Path) -> None:
+    # Ordered by status first: each status's months stay in order.
     sql = (
-        "SELECT to_char(created_at, 'YYYY-MM') AS month, status, count(*) AS n "
+        "SELECT status, to_char(created_at, 'YYYY-MM') AS month, count(*) AS n "
         "FROM shop.orders WHERE created_at < '2025-04-01' GROUP BY 1, 2 ORDER BY 1, 2"
     )
     (out,), _, _ = await _run(
@@ -175,14 +176,18 @@ async def test_a_pivoted_chart(tmp_path: Path) -> None:
                     "yAxis": {},
                     "series": [{"type": "bar", "stack": "s"}],
                 },
-                "pivot": {"index": "month", "columns": "status", "values": "n"},
+                "split_by": "status",
             },
         ),
     )
     props = _envelope(out)["props"]
-    assert props["dataset"]["source"][0] == ["month", "cancelled", "paid", "shipped"]
+    source = props["dataset"]["source"]
+    assert source[0] == ["month", "cancelled", "paid", "shipped"]
+    months = [r[0] for r in source[1:]]
+    assert months == sorted(months) and len(months) == len(set(months))
     assert [s["name"] for s in props["series"]] == ["cancelled", "paid", "shipped"]
     assert all(s["stack"] == "s" for s in props["series"])
+    assert props["series"][0]["encode"] == {"x": "month", "y": "cancelled"}
 
 
 async def test_a_big_chart_sends_a_summary(tmp_path: Path) -> None:
@@ -224,6 +229,16 @@ async def test_a_big_chart_sends_a_summary(tmp_path: Path) -> None:
             "query_chart",
             {"sql": "SELECT 1 AS a WHERE false", "option": {"series": [{"type": "bar"}]}},
             "no rows",
+        ),
+        (
+            "query_chart",
+            {
+                "sql": "SELECT to_char(created_at, 'YYYY-MM') AS month, status, customer_id "
+                "FROM shop.orders WHERE created_at < '2025-02-01'",
+                "option": {"series": [{"type": "line"}]},
+                "split_by": "status",
+            },
+            "GROUP BY month, status",
         ),
     ],
 )
