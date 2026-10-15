@@ -1,62 +1,75 @@
 # AGENTS.md
 
-## 项目概览
+## Project overview
 
-`lovia-db-agent` 是面向 PostgreSQL / MySQL 的自然语言数据分析应用。用户通过聊天提问，
-Agent 发现表结构、生成只读 SQL，再将查询结果直接呈现为交互表格或 ECharts 图表。
+`lovia-db-agent` is a natural-language data analysis app for PostgreSQL and MySQL.
+Users ask questions in chat; the agent discovers schemas, generates read-only SQL,
+and presents query results directly as interactive tables or ECharts charts.
 
-项目使用 Python 3.10+，基于 lovia 的 Agent、插件和聊天 UI，Web 应用为 FastAPI。
-数据库层使用 SQLAlchemy 异步引擎及 asyncpg / asyncmy，SQL 检查使用 sqlglot。
-连接名称、查询限制和业务技能目录通过 YAML 配置，连接 URL 从环境变量读取。
+The app uses Python 3.10+, lovia's Agent, plugins and chat UI, and FastAPI.
+Database access uses SQLAlchemy async engines with asyncpg / asyncmy; sqlglot checks SQL.
+YAML configures named connections, query limits and business skill directories;
+connection URLs come from environment variables.
 
-核心是 `SQLDatabase` 插件：`search_schema`、`describe_tables`、`query` 供模型探索，
-`query_table`、`query_chart` 将结果展示给用户。大结果由聊天存储保存，模型只接收预览或摘要。
+The central `SQLDatabase` plugin exposes `search_schema`, `describe_tables` and `query`
+for model exploration, and `query_table` and `query_chart` for user-facing results.
+Large results stay in chat storage; the model receives only previews or summaries.
 
-## 按任务定位代码
+## Code entry points
 
-以下路径均相对于仓库根目录；从相关入口及其测试开始阅读。
+Paths are relative to the repository root. Start with the relevant entry points and tests.
 
-| 任务 | 主要入口 |
+| Task | Main entry points |
 | --- | --- |
-| 启动、配置、Agent 组装 | `db_agent/__main__.py`、`db_agent/config.py`、`db_agent/app.py` |
-| 工具接口、提示词、结果封装 | `db_agent/plugin.py` 中的 `SQLDatabase` |
-| 表结构发现、搜索、描述 | `db_agent/catalog.py` |
-| SQL 检查、执行、连接池和数据库差异 | `db_agent/guard.py`、`db_agent/execute.py` |
-| 数据转换、图表 pivot、结果统计 | `db_agent/convert.py`、`db_agent/charts.py`、`db_agent/stats.py` |
-| 页面定制与图片来源 CSP | `db_agent/templates/index.html`；页面主体和组件由 lovia 提供，无独立前端构建 |
+| Startup, configuration, agent assembly | `db_agent/__main__.py`, `db_agent/config.py`, `db_agent/app.py` |
+| Tool interfaces, prompts, result envelopes | `SQLDatabase` in `db_agent/plugin.py` |
+| Schema discovery, search, descriptions | `db_agent/catalog.py` |
+| SQL checks, execution, pools, database differences | `db_agent/guard.py`, `db_agent/execute.py` |
+| Data conversion, chart pivots, result statistics | `db_agent/convert.py`, `db_agent/charts.py`, `db_agent/stats.py` |
+| Page customization and image-source CSP | `db_agent/templates/index.html`; lovia provides the page and components, with no separate frontend build |
 
-测试位于 `tests/`，其中 `test_postgres.py` 和 `test_mysql.py` 覆盖真实数据库上的端到端工具调用。
+Tests live in `tests/`; `test_postgres.py` and `test_mysql.py` cover end-to-end tool calls
+against real databases.
 
-## 工作流程
+## Workflow
 
-- 新任务默认创建独立分支，除非用户明确要求在 `main` 工作；现有 PR 的修订沿用其分支。
-  分支名按改动类型和内容命名，例如 `feat/query-export`、`fix/mysql-timeout`、`docs/agent-guide`，
-  不绑定具体 Agent 或工具名称。
-- 复杂任务实现后做对抗性审查，并处理发现的问题。
-- 实现、验证及必要文档更新完成后创建 PR；获取审查反馈并修复可操作的问题。
-- 只有审查反馈已处理且必需检查通过后才能合并。
+- Start new tasks on a separate branch unless the user explicitly requests work on `main`.
+  Reuse the existing branch for PR revisions. Name branches by change type and purpose,
+  such as `feat/query-export`, `fix/mysql-timeout` or `docs/agent-guide`, without agent or tool names.
+- For complex tasks, perform an adversarial review after implementation and address the findings.
+- Open a PR after implementation, verification and necessary documentation updates.
+  Fetch review feedback and fix actionable findings.
+- Merge only after review feedback is addressed and required checks pass.
 
-## 项目约束
+## Project constraints
 
-- `schemas`、`exclude_tables` 仅控制元数据发现，不能限制 SQL 访问；权限边界在数据库授权和视图。
-- 表格、图表的数据直接来自查询结果，模型只定义展示结构；复用 lovia 的 UI 和 `put_ui_data`。
-  大结果存储依赖聊天上下文，裸 `Runner.run` 没有该上下文时只返回预览。
-- `SQLDatabase.setup()` 每次运行都会调用；连接池和目录缓存保留在插件实例上，不能随每次运行重建。
-- `skills/` 存放应用运行时的业务指标定义，业务口径变更应落在这里。
+- `schemas` and `exclude_tables` only control metadata discovery, not SQL access.
+  Database grants and views enforce the access boundary.
+- Table and chart data comes directly from query results; the model defines presentation structure.
+  Reuse lovia's UI and `put_ui_data`. Large-result storage requires a chat context;
+  a bare `Runner.run` without that context returns only the preview.
+- `SQLDatabase.setup()` runs on every agent run. Keep connection pools and catalog caches
+  on the plugin instance rather than recreating them for each run.
+- `skills/` holds business metric definitions used by the app at runtime.
+  Changes to business definitions belong there.
 
-## 验证与易踩坑点
+## Validation and pitfalls
 
-开发命令见 [README.md](README.md#development)，检查项以 [.github/workflows/ci.yml](.github/workflows/ci.yml) 为准。
+Development commands are in [README.md](README.md#development).
+The check definitions are in [.github/workflows/ci.yml](.github/workflows/ci.yml).
 
-- 未设置 `DB_AGENT_TEST_PG_URL` / `DB_AGENT_TEST_MYSQL_URL` 时，对应集成测试整模块跳过。
-  修改共享数据库行为时需验证两种数据库，不能把只有单元测试通过当成完整验证。
-- Agent 集成测试使用 `lovia.testing.ScriptedProvider`，无需真实模型密钥。
-  测试完整 UI 结果存储时，参照 `tests/test_postgres.py` 中的 `ChatStore` / `UI_DATA_SINK` 设置。
-- 演示 SQL 会删除并重建 PostgreSQL 的 `shop` schema 或 MySQL 的 `demo_shop` database，
-  仅用于专用演示/测试数据库。
+- Without `DB_AGENT_TEST_PG_URL` / `DB_AGENT_TEST_MYSQL_URL`, the corresponding integration
+  test module is skipped entirely. Validate shared database changes against both databases;
+  passing unit tests alone is not full integration coverage.
+- Agent integration tests use `lovia.testing.ScriptedProvider` and need no real model API key.
+  For full UI result storage tests, follow the `ChatStore` / `UI_DATA_SINK` setup in
+  `tests/test_postgres.py`.
+- Demo SQL drops and recreates PostgreSQL's `shop` schema or MySQL's `demo_shop` database.
+  Run it only against dedicated demo or test databases.
 
-## 文档与发布
+## Documentation and releases
 
-- 用户可见变化同步更新 `README.md` 和 `README-zh.md`；配置变化同步对应示例文件。
-- 需要升版时同步 `pyproject.toml` 和 `db_agent/__init__.py`，并按发布约定更新变更记录。
-  纯文档修改无需升版。
+- Keep `README.md` and `README-zh.md` in sync for user-visible changes; update the relevant
+  example files when configuration changes.
+- When bumping the version, update both `pyproject.toml` and `db_agent/__init__.py`,
+  and update the changelog according to release conventions. Documentation-only changes need no bump.
