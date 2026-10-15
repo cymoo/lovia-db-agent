@@ -94,7 +94,8 @@ def prepare(sql: str, dialect: Dialect, limit: int | None) -> str:
         inner = _EXPLAIN_OPTS.sub("", tree.expression.name if tree.expression else "")
         prepare(inner, dialect, None)  # the explained statement must pass too
         return sql
-    if isinstance(tree, exp.Show):
+    # MySQL's SHOW parses as Show, PostgreSQL's (settings only) as a Command.
+    if isinstance(tree, exp.Show) or (isinstance(tree, exp.Command) and tree.name == "SHOW"):
         return sql
     if not isinstance(tree, _QUERIES):
         raise ToolError(f"{_kind(tree)} is not allowed: this database is read-only", hint=_HINT_ONE)

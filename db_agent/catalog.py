@@ -10,16 +10,31 @@ from __future__ import annotations
 
 import fnmatch
 import time
+from collections.abc import Sequence
 from dataclasses import dataclass, field
 from typing import Any
 
-from sqlalchemy import bindparam, inspect, text
+from lovia import ToolError
+from sqlalchemy import inspect
 
 from .execute import Database
 
-__all__ = ["Catalog", "Column", "Table", "describe", "load_catalog"]
+__all__ = [
+    "CATALOG_TIMEOUT_S",
+    "SAMPLE_TIMEOUT_S",
+    "Catalog",
+    "Column",
+    "Table",
+    "describe",
+    "load_catalog",
+]
 
 COMMENT_CHARS = 60
+SAMPLE_ROWS = 3
+CATALOG_TIMEOUT_S = 60
+"""Reading information_schema on a big MySQL can outlast the statement timeout."""
+SAMPLE_TIMEOUT_S = 3
+"""A view's sample can cost its whole query; past this it is skipped."""
 
 
 @dataclass
@@ -140,13 +155,13 @@ async def load_catalog(db: Database) -> Catalog:
     if schemas:
         params["schemas"] = list(schemas)
 
-    async def rows(sql: str, col: str) -> list[Any]:
-        stmt = text(sql.replace("{filter}", filt.format(col=col))).bindparams(
-            bindparam("system", expanding=True),
-            *([bindparam("schemas", expanding=True)] if schemas else []),
+    async def rows(sql: str, col: str) -> Sequence[Any]:
+        return await db.fetch(
+            sql.replace("{filter}", filt.format(col=col)),
+            params,
+            expanding=params.keys(),
+            timeout_s=CATALOG_TIMEOUT_S,
         )
-        async with db.engine.connect() as conn:
-            return list((await conn.execute(stmt, params)).all())
 
     schema_col = "n.nspname" if db.dialect == "postgres" else "TABLE_SCHEMA"
     by_key: dict[tuple[str, str], Table] = {}
@@ -163,8 +178,13 @@ async def load_catalog(db: Database) -> Catalog:
     return Catalog(list(by_key.values()))
 
 
-async def describe(db: Database, table: Table) -> str:
-    """Columns, keys, indexes and three sample rows of one table, as text."""
+async def describe(db: Database, table: Table, *, full: bool = True) -> str:
+    """Columns, keys, indexes and a few rows of one table, as text.
+
+    Never fails: the columns are known already, and keys or rows that can't
+    be read are left out or noted. Without ``full`` (out of time), only the
+    columns.
+    """
 
     def keys(sync_conn: Any) -> dict[str, Any]:
         insp = inspect(sync_conn)
@@ -180,14 +200,19 @@ async def describe(db: Database, table: Table) -> str:
                 out[key] = None
         return out
 
-    async with db.engine.connect() as conn:
-        info = await conn.run_sync(keys)
-
     lines = [f"## {table.heading()}", "columns:"]
     for c in table.columns:
         null = "" if c.nullable else " not null"
         note = f" — {c.comment}" if c.comment else ""
         lines.append(f"- {c.name} {c.type}{null}{note}")
+    if not full:
+        lines.append("keys and sample rows: skipped (out of time; describe it again on its own)")
+        return "\n".join(lines)
+
+    try:
+        info = await db.reflect(keys, statements=3)
+    except Exception:  # noqa: BLE001 - unreachable now; the sample will say so
+        info = {}
     pk = (info.get("pk") or {}).get("constrained_columns") or []
     if pk:
         lines.append(f"primary key: ({', '.join(pk)})")
@@ -202,13 +227,21 @@ async def describe(db: Database, table: Table) -> str:
         if cols:
             lines.append(f"index: {ix.get('name')} ({cols}){' unique' if ix.get('unique') else ''}")
 
-    sample = await db.run(
-        f"SELECT * FROM {db.quote(table.schema, table.name)}", max_rows=3, checked=False
-    )
-    if sample.rows:
-        lines.append("sample rows:")
-        lines.append("\t".join(sample.columns))
-        lines.extend("\t".join(_cell(v) for v in r) for r in sample.rows)
+    try:
+        # LIMIT, not just fetching fewer: both drivers read a whole result.
+        rows = await db.run(
+            f"SELECT * FROM {db.quote(table.schema, table.name)} LIMIT {SAMPLE_ROWS}",
+            max_rows=SAMPLE_ROWS,
+            checked=False,
+            timeout_s=SAMPLE_TIMEOUT_S,
+        )
+    except ToolError as exc:
+        lines.append(f"sample rows: unavailable ({exc.args[0]})")
+    else:
+        if rows.rows:
+            lines.append("sample rows:")
+            lines.append("\t".join(rows.columns))
+            lines.extend("\t".join(_cell(v) for v in r) for r in rows.rows)
     return "\n".join(lines)
 
 

@@ -9,12 +9,16 @@ a preview and per-column stats.
 
 Pools and catalogs live on the plugin object, created on first use: lovia
 calls ``setup()`` once per run, and they must outlive runs.
+
+Every wait inside a tool has a bound tighter than the tool's own timeout, so
+the model gets an error it can act on — lovia's timeout is only a backstop.
 """
 
 from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import time
 from typing import Annotated, Any
 
@@ -22,20 +26,27 @@ from lovia import PluginInstance, ToolError, tool
 from lovia.tools.base import Tool
 from lovia.web import put_ui_data, ui_result, validate_chart_option
 
-from .catalog import Catalog, describe, load_catalog
+from .catalog import CATALOG_TIMEOUT_S, SAMPLE_TIMEOUT_S, Catalog, describe, load_catalog
 from .charts import apply_pivot, check_encode, summarize
 from .config import Settings
-from .execute import Database
+from .execute import CLEANUP_S, Database, client_wait
 from .stats import column_stats
 
 __all__ = ["SQLDatabase"]
+
+logger = logging.getLogger(__name__)
 
 # Far below lovia's default max_tool_output_chars (200K): a truncated UI
 # envelope is broken JSON, so the tools size their own output.
 OUTPUT_CHARS = 60_000
 QUERY_OUTPUT_CHARS = 20_000
 CATALOG_TTL_S = 600
+"""After this a catalog is reloaded in the background; tools keep using the old one."""
+DOWN_RETRY_S = 30
+"""A database that failed to load isn't tried again for this long."""
 MAX_DESCRIBE = 10
+DESCRIBE_BUDGET_S = 30
+"""Time for describe_tables' keys and sample rows, all tables together."""
 # Module-level: the tools are closures, and lovia resolves their (string)
 # annotations against this module's globals.
 DB_ARG = "The database's name; omit when there is only one."
@@ -44,7 +55,7 @@ _DIALECT_NOTES = {
     "postgres": "PostgreSQL — date_trunc('month', t), to_char(t, 'YYYY-MM'), ILIKE, "
     '"double quotes" for identifiers, x::numeric casts',
     "mysql": "MySQL — DATE_FORMAT(t, '%Y-%m'), DATE(t), `backticks` for identifiers, "
-    "LIMIT n OFFSET m",
+    "LIMIT n OFFSET m, SHOW for server facts",
 }
 
 _WORKFLOW = """\
@@ -55,8 +66,8 @@ Never guess table or column names; qualify tables with their schema, as listed.
 the user) or `query_chart` (a chart for the user). Use show_chart only for data no single \
 query returns.
 3. For relative dates ("this month", "last week"), check today's date first.
-4. Do the math in SQL — totals, rankings, growth. For big results you see only a preview \
-and per-column stats; the user sees every row.
+4. Do the math in SQL — totals, rankings, growth; round averages and ratios there too. \
+For big results you see only a preview and per-column stats; the user sees every row.
 5. Only read-only statements run: SELECT, WITH … SELECT, EXPLAIN, SHOW.
 6. The table or chart is the answer: don't repeat its numbers in text. Say what stands out, \
 and how you computed it (filters, definitions)."""
@@ -75,6 +86,8 @@ class SQLDatabase:
         }
         self._catalogs: dict[str, Catalog] = {}
         self._locks = {name: asyncio.Lock() for name in self.databases}
+        self._down_until: dict[str, float] = {}
+        self._refreshing: dict[str, asyncio.Task[None]] = {}
         self._instructions: str | None = None
         self._tools = self._build_tools()
 
@@ -90,22 +103,58 @@ class SQLDatabase:
         return PluginInstance(tools=list(self._tools), instructions=instructions)
 
     async def aclose(self) -> None:
+        tasks = list(self._refreshing.values())
+        for task in tasks:
+            task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
         for db in self.databases.values():
             await db.aclose()
 
     # ---- catalogs -------------------------------------------------------
 
     async def catalog(self, db: Database) -> Catalog:
+        """The database's catalog: loaded once, then refreshed in the background.
+
+        Only the first load waits; a stale catalog is served while the next
+        one loads. Raise :class:`ToolError` if the database can't be read.
+        """
         cached = self._catalogs.get(db.name)
-        if cached is not None and time.monotonic() - cached.loaded_at < CATALOG_TTL_S:
-            return cached
-        async with self._locks[db.name]:
-            cached = self._catalogs.get(db.name)
-            if cached is None or time.monotonic() - cached.loaded_at >= CATALOG_TTL_S:
-                if not db.version:
-                    await db.load_version()
-                cached = self._catalogs[db.name] = await load_catalog(db)
-            return cached
+        if cached is None:
+            async with self._locks[db.name]:
+                cached = self._catalogs.get(db.name) or await self._load(db)
+        elif time.monotonic() - cached.loaded_at >= CATALOG_TTL_S:
+            self._refresh(db, cached)
+        return cached
+
+    async def _load(self, db: Database) -> Catalog:
+        if time.monotonic() < self._down_until.get(db.name, 0):
+            raise ToolError(f"{db.name} is unavailable right now", hint=_DOWN_HINT)
+        try:
+            if not db.version:
+                await db.load_version()
+            cat = self._catalogs[db.name] = await load_catalog(db)
+        except Exception as exc:  # noqa: BLE001 - any failure: the database is down for us
+            self._down_until[db.name] = time.monotonic() + DOWN_RETRY_S
+            logger.warning("%s: could not load the catalog", db.name, exc_info=exc)
+            raise ToolError(
+                f"{db.name} is unavailable right now ({type(exc).__name__})", hint=_DOWN_HINT
+            ) from None
+        return cat
+
+    def _refresh(self, db: Database, stale: Catalog) -> None:
+        if db.name in self._refreshing:
+            return
+
+        async def reload() -> None:
+            try:
+                async with self._locks[db.name]:
+                    self._catalogs[db.name] = await load_catalog(db)
+            except Exception as exc:  # noqa: BLE001 - keep the stale one, try again later
+                stale.loaded_at = time.monotonic() - CATALOG_TTL_S + DOWN_RETRY_S
+                logger.warning("%s: could not refresh the catalog", db.name, exc_info=exc)
+
+        task = self._refreshing[db.name] = asyncio.create_task(reload())
+        task.add_done_callback(lambda _: self._refreshing.pop(db.name, None))
 
     async def _build_instructions(self) -> tuple[str, bool]:
         budget = self.limits.catalog_budget_tokens * 4 // len(self.databases)
@@ -119,9 +168,9 @@ class SQLDatabase:
         for db in self.databases.values():
             try:
                 cat = await self.catalog(db)
-            except Exception as exc:  # noqa: BLE001 - a down database mustn't break the run
+            except ToolError:  # a down database mustn't break the run
                 complete = False
-                lines.append(f"- {db.name}: unavailable right now ({type(exc).__name__})")
+                lines.append(f"- {db.name}: unavailable right now")
                 continue
             facts = [db.label]
             if db.config.timezone:
@@ -156,7 +205,16 @@ class SQLDatabase:
 
     def _build_tools(self) -> list[Tool]:
         limits = self.limits
-        timeout = limits.statement_timeout_s + 15
+        # Backstops, each past the client-side limits of what the tool waits
+        # for (each call, plus dropping its connection should it hang).
+        stmt = limits.statement_timeout_s
+        statement = client_wait(stmt) + CLEANUP_S
+        # The first load: the version, then tables, then columns.
+        catalog = statement + 2 * (client_wait(CATALOG_TIMEOUT_S) + CLEANUP_S)
+        # Past the budget only the table being described runs on: its keys
+        # (three reflection queries) and its sample.
+        last_table = client_wait(stmt, 3) + client_wait(SAMPLE_TIMEOUT_S) + 2 * CLEANUP_S
+        margin = 5
 
         async def search_schema(
             query: Annotated[
@@ -193,10 +251,12 @@ class SQLDatabase:
             cat = await self.catalog(db)
             parts: list[str] = []
             missing: list[str] = []
+            deadline = time.monotonic() + DESCRIBE_BUDGET_S
             for ref in tables[:MAX_DESCRIBE]:
                 found = cat.find(ref)
                 if len(found) == 1:
-                    parts.append(await describe(db, found[0]))
+                    full = deadline - time.monotonic() > SAMPLE_TIMEOUT_S
+                    parts.append(await describe(db, found[0], full=full))
                 elif found:
                     names = ", ".join(t.qualified for t in found)
                     parts.append(f"## {ref}: ambiguous — use one of {names}")
@@ -326,12 +386,15 @@ class SQLDatabase:
             return ui_result("chart", preview, data=await put_ui_data(full))
 
         return [
-            tool(search_schema, timeout=timeout),
-            tool(describe_tables, timeout=timeout * 2),
-            tool(query, timeout=timeout),
-            tool(query_table, timeout=timeout),
-            tool(query_chart, timeout=timeout),
+            tool(search_schema, timeout=catalog + margin),
+            tool(describe_tables, timeout=catalog + DESCRIBE_BUDGET_S + last_table + margin),
+            tool(query, timeout=statement + margin),
+            tool(query_table, timeout=statement + margin),
+            tool(query_chart, timeout=statement + margin),
         ]
+
+
+_DOWN_HINT = "retry in a minute; if it keeps failing, tell the user the database is down"
 
 
 def _size(value: Any) -> int:

@@ -109,3 +109,25 @@ async def test_the_session_is_read_only_and_literals_pass_through() -> None:
         assert "took too long" in (exc.value.hint or "")
     finally:
         await db.aclose()
+
+
+async def test_our_own_time_limits_stay_with_their_statement() -> None:
+    db = Database("shop", Connection(url_env=URL_ENV), Limits(statement_timeout_s=30))
+    try:
+        # The optimizer hint cuts this one statement short...
+        with pytest.raises(ToolError) as exc:
+            await db.run(
+                "SELECT SUM(a.quantity * b.quantity) FROM demo_shop.order_items a "
+                "JOIN demo_shop.order_items b ON a.unit_price > b.unit_price",
+                max_rows=1,
+                checked=False,
+                timeout_s=0.05,
+            )
+        assert "took too long" in (exc.value.hint or "")
+        # ...and leaves the session's limit alone.
+        res = await db.run("SELECT @@SESSION.max_execution_time", max_rows=1)
+        assert res.rows == [[30000]]
+        res = await db.run("SHOW VARIABLES LIKE 'max_execution_time'", max_rows=5)
+        assert res.rows == [["max_execution_time", "30000"]]
+    finally:
+        await db.aclose()

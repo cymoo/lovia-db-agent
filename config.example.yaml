@@ -10,6 +10,7 @@ connections:
                                   # (MySQL: the URL's database)
     # exclude_tables: ["tmp_*"]   # glob patterns left out of discovery
     timezone: Asia/Shanghai       # what "today" means in SQL; also how times display
+                                  # (or an offset: +08:00 is east of UTC, on both databases)
 
 # Extra instructions: language, tone, house rules.
 instructions: |
