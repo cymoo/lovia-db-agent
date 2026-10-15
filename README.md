@@ -16,7 +16,7 @@ copies a number. Built on [lovia](https://github.com/cymoo/lovia) and its web UI
   while the user's table pages through all of them (up to 10,000), with sort,
   filter, copy and CSV. Charts with lots of points do the same.
 - **Charts from SQL.** The model writes the chart's shape; the rows fill it in.
-  `pivot` turns `(month, category, revenue)` rows into one line per category.
+  `split_by` turns `(month, category, revenue)` rows into one line per category.
 - **Read-only, three ways.** A read-only account (your job — see below), a
   read-only session with a statement timeout on every connection, and a SQL
   check that refuses writes and caps the outermost `LIMIT`.
@@ -77,7 +77,7 @@ This is the security boundary, so do it properly:
 | `describe_tables` | the model | columns, keys, indexes, 3 sample rows |
 | `query` | the model | up to 50 rows, as text |
 | `query_table` | the user | a table (`ui_result("table")`; when big, the model gets a preview) |
-| `query_chart` | the user | an ECharts chart from the rows (`pivot` for series per category) |
+| `query_chart` | the user | an ECharts chart from the rows (`split_by` for one series per category) |
 
 Plus lovia's `show_chart` (for data no single query returns) and `now`.
 
