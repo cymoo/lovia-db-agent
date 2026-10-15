@@ -14,7 +14,7 @@ CREATE TABLE customers (
     id          INT PRIMARY KEY,
     name        VARCHAR(100) NOT NULL,
     city        VARCHAR(20) NOT NULL COMMENT '所在城市',
-    tier        VARCHAR(10) NOT NULL COMMENT '会员等级：bronze / silver / gold',
+    tier        ENUM('bronze', 'silver', 'gold') NOT NULL COMMENT '会员等级',
     created_at  DATETIME NOT NULL
 ) COMMENT '会员';
 
@@ -52,6 +52,13 @@ CREATE TABLE refunds (
     created_at  DATETIME NOT NULL,
     FOREIGN KEY (order_id) REFERENCES orders (id)
 ) COMMENT '退款';
+
+CREATE TABLE visits (
+    customer_id  INT COMMENT '会员；空为未登录访客',
+    page         VARCHAR(20) NOT NULL COMMENT '页面：home / product / cart / checkout',
+    visited_at   DATETIME NOT NULL,
+    FOREIGN KEY (customer_id) REFERENCES customers (id)
+) COMMENT '访问记录';
 
 -- Pseudo-random numbers in [0, 1): CRC32(CONCAT(salt, key)) % 100000 / 100000.
 -- Deterministic, and unlike RAND(seed) — whose first value barely moves
@@ -110,7 +117,17 @@ SELECT ROW_NUMBER() OVER (ORDER BY o.id),
 FROM orders o
 WHERE o.status = 'shipped' AND CRC32(CONCAT('refund', o.id)) % 100000 / 100000 < 0.06;
 
-ANALYZE TABLE customers, products, orders, order_items, refunds;
+INSERT INTO visits
+WITH RECURSIVE n (i) AS (SELECT 1 UNION ALL SELECT i + 1 FROM n WHERE i < 20000)
+SELECT IF(CRC32(CONCAT('member', i)) % 100000 / 100000 < 0.7,
+          1 + FLOOR(CRC32(CONCAT('visitor', i)) % 100000 / 100000 * 400), NULL),
+       ELT(1 + FLOOR(CRC32(CONCAT('page', i)) % 100000 / 100000 * 7),
+           'home', 'home', 'home', 'product', 'product', 'cart', 'checkout'),
+       TIMESTAMP('2025-01-01')
+         + INTERVAL FLOOR(CRC32(CONCAT('visit', i)) % 100000 / 100000 * 650 * 86400) SECOND
+FROM n;
+
+ANALYZE TABLE customers, products, orders, order_items, refunds, visits;
 
 -- The agent's account: SELECT on this database only.
 CREATE USER IF NOT EXISTS 'agent_ro'@'%' IDENTIFIED BY 'agent_ro';

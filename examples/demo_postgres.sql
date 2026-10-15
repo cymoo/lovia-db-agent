@@ -1,5 +1,6 @@
 -- A small demo database for lovia-db-agent: a shop with customers, products,
--- orders, order items and refunds over 2025-2026, plus a SELECT-only role.
+-- orders, order items, refunds and site visits over 2025-2026, plus a
+-- SELECT-only role.
 --
 --   createdb demo_shop
 --   psql demo_shop -f examples/demo_postgres.sql
@@ -13,16 +14,18 @@ COMMENT ON SCHEMA shop IS '演示用网店数据';
 
 SELECT setseed(0.42);
 
+CREATE TYPE shop.customer_tier AS ENUM ('bronze', 'silver', 'gold');
+
 CREATE TABLE shop.customers (
     id          integer PRIMARY KEY,
     name        text NOT NULL,
     city        text NOT NULL,
-    tier        text NOT NULL,
+    tier        shop.customer_tier NOT NULL,
     created_at  timestamptz NOT NULL
 );
 COMMENT ON TABLE shop.customers IS '会员';
 COMMENT ON COLUMN shop.customers.city IS '所在城市';
-COMMENT ON COLUMN shop.customers.tier IS '会员等级：bronze / silver / gold';
+COMMENT ON COLUMN shop.customers.tier IS '会员等级';
 
 CREATE TABLE shop.products (
     id        integer PRIMARY KEY,
@@ -65,11 +68,25 @@ CREATE TABLE shop.refunds (
 COMMENT ON TABLE shop.refunds IS '退款';
 COMMENT ON COLUMN shop.refunds.amount IS '退款金额（元）';
 
+-- Partitioned by year: the partitions roll up into one table for the agent.
+CREATE TABLE shop.visits (
+    customer_id  integer REFERENCES shop.customers (id),
+    page         text NOT NULL,
+    visited_at   timestamptz NOT NULL
+) PARTITION BY RANGE (visited_at);
+CREATE TABLE shop.visits_2025 PARTITION OF shop.visits
+    FOR VALUES FROM ('2025-01-01') TO ('2026-01-01');
+CREATE TABLE shop.visits_2026 PARTITION OF shop.visits
+    FOR VALUES FROM ('2026-01-01') TO ('2027-01-01');
+COMMENT ON TABLE shop.visits IS '访问记录';
+COMMENT ON COLUMN shop.visits.customer_id IS '会员；空为未登录访客';
+COMMENT ON COLUMN shop.visits.page IS '页面：home / product / cart / checkout';
+
 INSERT INTO shop.customers
 SELECT i,
        'customer ' || i,
        (ARRAY['上海', '北京', '深圳', '杭州', '成都', '武汉'])[1 + floor(random() * 6)::int],
-       (ARRAY['bronze', 'bronze', 'bronze', 'silver', 'silver', 'gold'])[1 + floor(random() * 6)::int],
+       (ARRAY['bronze', 'bronze', 'bronze', 'silver', 'silver', 'gold'])[1 + floor(random() * 6)::int]::shop.customer_tier,
        timestamptz '2024-01-01' + random() * interval '700 days'
 FROM generate_series(1, 400) AS i;
 
@@ -111,7 +128,13 @@ FROM shop.orders o
 WHERE o.status = 'shipped' AND random() < 0.06
   AND EXISTS (SELECT 1 FROM shop.order_items WHERE order_id = o.id);
 
-ANALYZE shop.customers, shop.products, shop.orders, shop.order_items, shop.refunds;
+INSERT INTO shop.visits
+SELECT CASE WHEN random() < 0.7 THEN 1 + floor(random() * 400)::int END,
+       (ARRAY['home', 'home', 'home', 'product', 'product', 'cart', 'checkout'])[1 + floor(random() * 7)::int],
+       timestamptz '2025-01-01' + random() * interval '650 days'
+FROM generate_series(1, 20000);
+
+ANALYZE shop.customers, shop.products, shop.orders, shop.order_items, shop.refunds, shop.visits;
 
 -- The agent's account: SELECT on this schema, read-only by default.
 DO $$

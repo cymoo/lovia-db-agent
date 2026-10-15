@@ -30,4 +30,4 @@ data_dir: .data
 #   chart_rows: 5000            # most rows a chart query may return
 #   chart_max_series: 20
 #   chart_inline_bytes: 4096    # bigger chart data stays out of the model's view; it gets a summary
-#   catalog_budget_tokens: 2000 # system-prompt room for the table list
+#   catalog_budget_tokens: 6000 # system-prompt room for the schema

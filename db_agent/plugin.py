@@ -1,11 +1,11 @@
 """`SQLDatabase`: the lovia plugin that lets an agent query your databases.
 
 It contributes five tools and a system-prompt section listing the databases
-and (within a budget) their tables. Two of the tools explore, for the model
-only; two answer, for the user — a table or a chart drawn from the query's
-rows, so no number passes through the model's output. A big result is kept
-with the chat (lovia's ``put_ui_data``) for the page to draw; the model sees
-a preview and per-column stats.
+and their schemas — as much as a budget allows, most important first. Two of
+the tools explore, for the model only; two answer, for the user — a table or
+a chart drawn from the query's rows, so no number passes through the model's
+output. A big result is kept with the chat (lovia's ``put_ui_data``) for the
+page to draw; the model sees a preview and per-column stats.
 
 Pools and catalogs live on the plugin object, created on first use: lovia
 calls ``setup()`` once per run, and they must outlive runs.
@@ -26,7 +26,14 @@ from lovia import PluginInstance, ToolError, tool
 from lovia.tools.base import Tool
 from lovia.web import put_ui_data, ui_result, validate_chart_option
 
-from .catalog import CATALOG_TIMEOUT_S, SAMPLE_TIMEOUT_S, Catalog, describe, load_catalog
+from .catalog import (
+    CATALOG_TIMEOUT_S,
+    INDEX_STATEMENTS,
+    SAMPLE_TIMEOUT_S,
+    Catalog,
+    describe,
+    load_catalog,
+)
 from .charts import apply_split, check_encode, summarize
 from .config import Settings
 from .convert import cell_text
@@ -48,23 +55,34 @@ DOWN_RETRY_S = 30
 """A database that failed to load isn't tried again for this long."""
 MAX_DESCRIBE = 10
 DESCRIBE_BUDGET_S = 30
-"""Time for describe_tables' keys and sample rows, all tables together."""
+"""Time for describe_tables' indexes, common values and sample rows, all
+tables together; columns and keys come from the catalog."""
 # Module-level: the tools are closures, and lovia resolves their (string)
 # annotations against this module's globals.
 DB_ARG = "The database's name; omit when there is only one."
 
+_LEGEND = (
+    "In table(…) definitions, `pk` marks the primary key, `a→t` a foreign key to t's "
+    "primary key (`a→t.c` to column c), enum(…) the allowed values; key columns omit their type."
+)
+
 _WORKFLOW = """\
-How to work:
-1. Find tables with search_schema and read them with describe_tables before writing SQL. \
-Never guess table or column names; qualify tables with their schema, as listed.
-2. Explore with `query` — only you see its rows. Answer with `query_table` (a table for \
-the user) or `query_chart` (a chart for the user). Use show_chart only for data no single \
-query returns.
-3. For relative dates ("this month", "last week"), check today's date first.
-4. Do the math in SQL — totals, rankings, growth; round averages and ratios there too. \
-For big results you see only a preview and per-column stats; the user sees every row.
-5. Only read-only statements run: SELECT, WITH … SELECT, EXPLAIN, SHOW.
-6. The table or chart is the answer: don't repeat its numbers in text. Say what stands out, \
+How to work — aim for a correct answer in as few steps as the question needs:
+- Tables listed with their columns are ready to query: write the SQL straight away. For any \
+other table, or a definition cut short (…), find it with search_schema and read it with \
+describe_tables (keys, indexes, common values, sample rows). Use names exactly as listed, \
+qualified with their schema; when unsure of a name or a value's spelling, look it up rather \
+than guess.
+- Explore with `query` — only you see its rows. Answer with `query_table` (a table for the \
+user) or `query_chart` (a chart for the user). Use show_chart only for data no single query \
+returns.
+- Relative dates ("this month", "last week") count from today's date, stated in this prompt. \
+If such a query comes back empty, check where the data ends (MAX of the date column) before \
+saying there is none, and tell the user.
+- Do the math in SQL — totals, rankings, growth; round averages and ratios there too. For big \
+results you see only a preview and per-column stats; the user sees every row.
+- Only read-only statements run: SELECT, WITH … SELECT, EXPLAIN, SHOW.
+- The table or chart is the answer: don't repeat its numbers in text. Say what stands out, \
 and how you computed it (filters, definitions)."""
 
 
@@ -83,19 +101,29 @@ class SQLDatabase:
         self._locks = {name: asyncio.Lock() for name in self.databases}
         self._down_until: dict[str, float] = {}
         self._refreshing: dict[str, asyncio.Task[None]] = {}
-        self._instructions: str | None = None
+        self._instructions: tuple[tuple[Any, ...], str] | None = None
         self._tools = self._build_tools()
 
     async def setup(self) -> PluginInstance:
-        instructions = self._instructions
-        if instructions is None:
-            instructions, complete = await self._build_instructions()
-            # Cached once every catalog loaded: a byte-stable system prompt keeps
-            # the provider's prompt cache warm. A database that was down is
-            # retried on the next run.
-            if complete:
-                self._instructions = instructions
-        return PluginInstance(tools=list(self._tools), instructions=instructions)
+        return PluginInstance(tools=list(self._tools), instructions=await self._prompt())
+
+    async def _prompt(self) -> str:
+        """The system-prompt section, rebuilt only when a schema changes.
+
+        Byte-stable otherwise — row estimates drift, the text doesn't — so
+        the provider's prompt cache stays warm. A database that was down is
+        tried again on the next run.
+        """
+        catalogs: dict[str, Catalog | None] = {}
+        for db in self.databases.values():
+            try:
+                catalogs[db.name] = await self.catalog(db)
+            except ToolError:  # a down database mustn't break the run
+                catalogs[db.name] = None
+        key = tuple((name, cat and cat.fingerprint) for name, cat in catalogs.items())
+        if self._instructions is None or self._instructions[0] != key:
+            self._instructions = (key, self._build_instructions(catalogs))
+        return self._instructions[1]
 
     async def aclose(self) -> None:
         tasks = list(self._refreshing.values())
@@ -151,20 +179,18 @@ class SQLDatabase:
         task = self._refreshing[db.name] = asyncio.create_task(reload())
         task.add_done_callback(lambda _: self._refreshing.pop(db.name, None))
 
-    async def _build_instructions(self) -> tuple[str, bool]:
+    def _build_instructions(self, catalogs: dict[str, Catalog | None]) -> str:
         budget = self.limits.catalog_budget_tokens * 4 // len(self.databases)
         lines = [
             "## Databases",
             "You answer questions from these read-only databases. Pass a database's "
             "name as `database`" + (" (or omit it: there is only one)." if len(self) == 1 else "."),
+            _LEGEND,
             "",
         ]
-        complete = True
         for db in self.databases.values():
-            try:
-                cat = await self.catalog(db)
-            except ToolError:  # a down database mustn't break the run
-                complete = False
+            cat = catalogs[db.name]
+            if cat is None:
                 lines.append(f"- {db.name}: unavailable right now")
                 continue
             facts = [db.label]
@@ -172,11 +198,11 @@ class SQLDatabase:
                 facts.append(f"time zone {db.config.timezone}")
             about = f": {db.config.description}" if db.config.description else ""
             lines.append(f"- {db.name} ({'; '.join(facts)}){about}")
-            lines.append(f"  {cat.overview(budget)}")
+            lines.extend(f"  {line}" for line in cat.overview(budget).splitlines())
         dialects = {db.dialect.name: db.dialect for db in self.databases.values()}
         notes = "; ".join(dialects[d].notes for d in sorted(dialects))
         lines += ["", _WORKFLOW, "Dialect notes: " + notes]
-        return "\n".join(lines), complete
+        return "\n".join(lines)
 
     def __len__(self) -> int:
         return len(self.databases)
@@ -205,11 +231,13 @@ class SQLDatabase:
         # for (each call, plus dropping its connection should it hang).
         stmt = limits.statement_timeout_s
         statement = client_wait(stmt) + CLEANUP_S
-        # The first load: the version, then tables, then columns.
-        catalog = statement + 2 * (client_wait(CATALOG_TIMEOUT_S) + CLEANUP_S)
-        # Past the budget only the table being described runs on: its keys
-        # (three reflection queries) and its sample.
-        last_table = client_wait(stmt, 3) + client_wait(SAMPLE_TIMEOUT_S) + 2 * CLEANUP_S
+        # The first load: the version, then tables, columns and keys.
+        catalog = statement + 3 * (client_wait(CATALOG_TIMEOUT_S) + CLEANUP_S)
+        # Past the budget only the table being described runs on: its indexes
+        # (reflection), its common values and its sample.
+        last_table = (
+            client_wait(stmt, INDEX_STATEMENTS) + 2 * client_wait(SAMPLE_TIMEOUT_S) + 3 * CLEANUP_S
+        )
         margin = 5
 
         async def search_schema(
@@ -221,7 +249,8 @@ class SQLDatabase:
             database: Annotated[str | None, DB_ARG] = None,
             limit: Annotated[int, "How many tables to return (max 50)."] = 20,
         ) -> str:
-            """Find tables by name, column or comment. Use it before writing SQL."""
+            """Find tables by name, column or comment — for tables the system
+            prompt doesn't define."""
             db = self.database(database)
             hits = (await self.catalog(db)).search(query, max(1, min(limit, 50)))
             if not hits:
@@ -240,7 +269,7 @@ class SQLDatabase:
             ],
             database: Annotated[str | None, DB_ARG] = None,
         ) -> str:
-            """Columns (with comments), keys, indexes and sample rows of tables."""
+            """Columns (with comments), keys, indexes, common values and sample rows of tables."""
             db = self.database(database)
             if not tables:
                 raise ToolError("no tables given", hint="pass names from search_schema")
@@ -251,8 +280,9 @@ class SQLDatabase:
             for ref in tables[:MAX_DESCRIBE]:
                 found = cat.find(ref)
                 if len(found) == 1:
-                    full = deadline - time.monotonic() > SAMPLE_TIMEOUT_S
-                    parts.append(await describe(db, found[0], full=full))
+                    # Room for its common values and its sample at least.
+                    full = deadline - time.monotonic() > 2 * SAMPLE_TIMEOUT_S
+                    parts.append(await describe(db, cat, found[0], full=full))
                 elif found:
                     names = ", ".join(t.qualified for t in found)
                     parts.append(f"## {ref}: ambiguous — use one of {names}")
@@ -283,7 +313,13 @@ class SQLDatabase:
             res = await db.run(sql, max_rows=limits.query_rows)
             if not res.columns:
                 return "The statement returned no result set."
-            return _tsv(res.columns, res.rows, more=res.truncated, budget=QUERY_OUTPUT_CHARS)
+            return _tsv(
+                res.columns,
+                res.rows,
+                more=res.truncated,
+                budget=QUERY_OUTPUT_CHARS,
+                elapsed_ms=res.elapsed_ms,
+            )
 
         async def query_table(
             sql: Annotated[str, "One read-only statement in the database's dialect."],
@@ -409,7 +445,9 @@ def _fit_preview(props: dict[str, Any], preview_rows: int) -> dict[str, Any]:
         k //= 2
 
 
-def _tsv(columns: list[str], rows: list[list[Any]], *, more: bool, budget: int) -> str:
+def _tsv(
+    columns: list[str], rows: list[list[Any]], *, more: bool, budget: int, elapsed_ms: int
+) -> str:
     lines = ["\t".join(columns)]
     used = len(lines[0])
     shown = 0
@@ -420,11 +458,18 @@ def _tsv(columns: list[str], rows: list[list[Any]], *, more: bool, budget: int) 
         lines.append(line)
         used += len(line) + 1
         shown += 1
+    took = _duration(elapsed_ms)
     if shown < len(rows) or more:
-        lines.append(f"(first {shown} rows; there are more — filter or aggregate in SQL)")
+        lines.append(f"(first {shown} rows, {took}; there are more — filter or aggregate in SQL)")
     else:
-        lines.append(f"({shown} row{'s' if shown != 1 else ''})")
+        lines.append(f"({shown} row{'s' if shown != 1 else ''}, {took})")
     return "\n".join(lines)
+
+
+def _duration(ms: int) -> str:
+    """``12 ms``, ``3.2s``: how long the statement ran — a slow one is worth
+    narrowing before it's run again for the user."""
+    return f"{ms} ms" if ms < 1000 else f"{ms / 1000:.1f}s"
 
 
 def _fit_text(text: str, budget: int) -> str:

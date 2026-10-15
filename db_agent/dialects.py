@@ -47,9 +47,14 @@ class Dialect:
     ``:system`` is the system schemas; ``{filter}`` is where load_catalog adds
     ``AND <schema_column> IN :schemas``."""
     columns_sql: str
-    """Rows of (schema, table, column, type, nullable, comment), as tables_sql."""
+    """Rows of (schema, table, column, type, nullable, comment, enum labels),
+    as tables_sql. Labels may be NULL: an ``enum('a','b')`` type is read for them."""
+    keys_sql: str
+    """Rows of (schema, table, constraint, "p" | "f", column, referenced schema,
+    table, column), one per key column in order, as tables_sql: every primary
+    and foreign key."""
     schema_column: str
-    """The schema column in tables_sql and columns_sql, for ``{filter}``."""
+    """The schema column in tables_sql, columns_sql and keys_sql, for ``{filter}``."""
     notes: str
     """What the model should remember about the SQL, in a line."""
     hints: Mapping[str, str]
@@ -58,6 +63,11 @@ class Dialect:
     """Error codes about the connection itself, not the statement: no SQL fixes them."""
     on_connect: Callable[[Any], Awaitable[None]] | None = None
     """Run on every new driver connection, before its first statement."""
+    common_values_sql: str | None = None
+    """Rows of (column, most common values, their shares of rows, n_distinct
+    as PostgreSQL's pg_stats has it) for ``:schema``, ``:table`` and the
+    ``:columns`` asked about — kept statistics, no table scan. None: the
+    server keeps none."""
 
     def hint(self, code: str) -> str:
         return self.hints.get(code, "fix the SQL and try again")
@@ -121,12 +131,18 @@ def _pg_time_zone(tz: str) -> str:
 
 _OFFSET = re.compile(r"([+-])(\d{1,2}):?(\d{2})")
 
-# Readable tables, views and materialized views; partitions roll up into their parent.
+# Readable tables, views and materialized views; partitions roll up into
+# their parent, whose row estimate is the sum of its leaves' (PostgreSQL 12+).
 _PG_TABLES = """
 SELECT n.nspname, c.relname,
        CASE WHEN c.relkind IN ('v', 'm') THEN 'view' ELSE 'table' END,
        obj_description(c.oid, 'pg_class'),
-       CASE WHEN c.reltuples < 0 THEN NULL ELSE c.reltuples::bigint END
+       CASE WHEN c.relkind = 'p' THEN (
+                SELECT sum(l.reltuples) FILTER (WHERE l.reltuples >= 0)::bigint
+                FROM pg_partition_tree(c.oid) p JOIN pg_class l ON l.oid = p.relid
+                WHERE p.isleaf)
+            WHEN c.reltuples < 0 THEN NULL
+            ELSE c.reltuples::bigint END
 FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
 WHERE c.relkind IN ('r', 'p', 'v', 'm', 'f') AND NOT c.relispartition
   AND n.nspname NOT IN :system AND n.nspname NOT LIKE 'pg\\_toast%'
@@ -134,15 +150,45 @@ WHERE c.relkind IN ('r', 'p', 'v', 'm', 'f') AND NOT c.relispartition
 """
 _PG_COLUMNS = """
 SELECT n.nspname, c.relname, a.attname, format_type(a.atttypid, a.atttypmod),
-       NOT a.attnotnull, col_description(c.oid, a.attnum)
+       NOT a.attnotnull, col_description(c.oid, a.attnum),
+       CASE WHEN t.typtype = 'e' THEN ARRAY(
+           SELECT e.enumlabel::text FROM pg_enum e
+           WHERE e.enumtypid = t.oid ORDER BY e.enumsortorder) END
 FROM pg_attribute a
 JOIN pg_class c ON c.oid = a.attrelid
 JOIN pg_namespace n ON n.oid = c.relnamespace
+JOIN pg_type t ON t.oid = a.atttypid
 WHERE a.attnum > 0 AND NOT a.attisdropped
   AND c.relkind IN ('r', 'p', 'v', 'm', 'f') AND NOT c.relispartition
   AND n.nspname NOT IN :system AND n.nspname NOT LIKE 'pg\\_toast%'
   AND has_table_privilege(c.oid, 'SELECT'){filter}
 ORDER BY n.nspname, c.relname, a.attnum
+"""
+# A partition's copies of its parent's constraints (conparentid) are left out.
+_PG_KEYS = """
+SELECT n.nspname, c.relname, con.conname, con.contype::text, a.attname,
+       rn.nspname, rc.relname, ra.attname
+FROM pg_constraint con
+JOIN pg_class c ON c.oid = con.conrelid
+JOIN pg_namespace n ON n.oid = c.relnamespace
+CROSS JOIN LATERAL unnest(con.conkey, con.confkey) WITH ORDINALITY AS k(attnum, refnum, i)
+JOIN pg_attribute a ON a.attrelid = con.conrelid AND a.attnum = k.attnum
+LEFT JOIN pg_class rc ON rc.oid = con.confrelid
+LEFT JOIN pg_namespace rn ON rn.oid = rc.relnamespace
+LEFT JOIN pg_attribute ra ON ra.attrelid = con.confrelid AND ra.attnum = k.refnum
+WHERE con.contype IN ('p', 'f') AND con.conparentid = 0 AND NOT c.relispartition
+  AND n.nspname NOT IN :system AND n.nspname NOT LIKE 'pg\\_toast%'{filter}
+ORDER BY n.nspname, c.relname, con.conname, k.i
+"""
+# The planner's statistics: a partitioned or inherited table's own row
+# (inherited) covers its children.
+_PG_COMMON_VALUES = """
+SELECT DISTINCT ON (attname) attname, most_common_vals::text::text[], most_common_freqs,
+       n_distinct
+FROM pg_stats
+WHERE schemaname = :schema AND tablename = :table AND attname IN :columns
+  AND most_common_vals IS NOT NULL
+ORDER BY attname, inherited DESC
 """
 
 POSTGRES = Dialect(
@@ -155,6 +201,7 @@ POSTGRES = Dialect(
     version_sql="SHOW server_version",
     tables_sql=_PG_TABLES,
     columns_sql=_PG_COLUMNS,
+    keys_sql=_PG_KEYS,
     schema_column="n.nspname",
     notes="PostgreSQL — date_trunc('month', t), to_char(t, 'YYYY-MM'), ILIKE, "
     '"double quotes" for identifiers, x::numeric casts',
@@ -180,6 +227,7 @@ POSTGRES = Dialect(
     ),
     # Dates and timestamps as text, any year (see pgtypes.py).
     on_connect=pgtypes.register,
+    common_values_sql=_PG_COMMON_VALUES,
 )
 
 
@@ -208,12 +256,22 @@ SELECT TABLE_SCHEMA, TABLE_NAME,
 FROM information_schema.TABLES
 WHERE TABLE_SCHEMA NOT IN :system{filter}
 """
+# Enum labels are in COLUMN_TYPE already.
 _MYSQL_COLUMNS = """
 SELECT TABLE_SCHEMA, TABLE_NAME, COLUMN_NAME, COLUMN_TYPE,
-       IS_NULLABLE = 'YES', COLUMN_COMMENT
+       IS_NULLABLE = 'YES', COLUMN_COMMENT, NULL
 FROM information_schema.COLUMNS
 WHERE TABLE_SCHEMA NOT IN :system{filter}
 ORDER BY TABLE_SCHEMA, TABLE_NAME, ORDINAL_POSITION
+"""
+_MYSQL_KEYS = """
+SELECT TABLE_SCHEMA, TABLE_NAME, CONSTRAINT_NAME,
+       CASE WHEN CONSTRAINT_NAME = 'PRIMARY' THEN 'p' ELSE 'f' END, COLUMN_NAME,
+       REFERENCED_TABLE_SCHEMA, REFERENCED_TABLE_NAME, REFERENCED_COLUMN_NAME
+FROM information_schema.KEY_COLUMN_USAGE
+WHERE (CONSTRAINT_NAME = 'PRIMARY' OR REFERENCED_TABLE_NAME IS NOT NULL)
+  AND TABLE_SCHEMA NOT IN :system{filter}
+ORDER BY TABLE_SCHEMA, TABLE_NAME, CONSTRAINT_NAME, ORDINAL_POSITION
 """
 
 MYSQL = Dialect(
@@ -226,6 +284,7 @@ MYSQL = Dialect(
     version_sql="SELECT VERSION()",
     tables_sql=_MYSQL_TABLES,
     columns_sql=_MYSQL_COLUMNS,
+    keys_sql=_MYSQL_KEYS,
     schema_column="TABLE_SCHEMA",
     notes="MySQL — DATE_FORMAT(t, '%Y-%m'), DATE(t), `backticks` for identifiers, "
     "LIMIT n OFFSET m, SHOW for server facts",
