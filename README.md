@@ -85,6 +85,13 @@ the full rows with the chat (deleted with it), the model reads a preview with
 per-column stats, and the page draws every row with lovia's built-in table and
 chart, in the chat and in its HTML export.
 
+Every wait has a limit — connecting, a pool slot, each statement — so a slow
+or down database reaches the model as an error with a hint, not a hang.
+`describe_tables` samples each table with a `LIMIT` and a 3-second cap, and
+gives up keys and samples rather than the whole call when time runs short.
+Values Python can't hold, like PostgreSQL's `infinity`, BC dates or year 10000,
+arrive as text.
+
 A Content-Security-Policy keeps the page from loading remote images, so text
 planted in the database can't make a reply leak data through an image URL.
 

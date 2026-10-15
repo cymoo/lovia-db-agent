@@ -22,6 +22,7 @@ from lovia.transcript import ToolResultEntry
 from lovia.web.components import UI_DATA_SINK
 from lovia.web.store import ChatStore
 
+from db_agent import plugin
 from db_agent.app import build_agent, build_app
 from db_agent.config import Connection, Limits, Settings
 from db_agent.execute import Database
@@ -100,6 +101,11 @@ async def test_query_is_for_the_model(tmp_path: Path) -> None:
     assert (
         lines[0] == "status\tn" and lines[1].startswith("cancelled\t") and lines[-1] == "(3 rows)"
     )
+
+
+async def test_show_reads_a_setting(tmp_path: Path) -> None:
+    (out,), _, _ = await _run(_settings(tmp_path), call("query", {"sql": "SHOW TimeZone"}))
+    assert not out.is_error and out.output.splitlines()[1] == "Asia/Shanghai"
 
 
 async def test_a_small_table_travels_whole(tmp_path: Path) -> None:
@@ -241,6 +247,78 @@ async def test_the_session_is_read_only_and_time_boxed(tmp_path: Path) -> None:
         assert res.rows == [["12:30", "a%b"]]
     finally:
         await db.aclose()
+
+
+async def test_values_python_cant_hold_still_arrive() -> None:
+    db = Database("shop", Connection(url_env=URL_ENV, timezone="Asia/Shanghai"), Limits())
+    try:
+        res = await db.run(
+            "SELECT '10000-01-01'::date AS far, '0044-03-15 BC'::date AS bc, "
+            "'infinity'::timestamptz AS inf, '2026-01-01 00:00+00'::timestamptz AS tz, "
+            "'2026-01-01 08:30'::timestamp AS ts, daterange('2026-01-01', '2026-02-01') AS r, "
+            "ARRAY['2026-01-01'::date, NULL] AS a, ROW('2026-01-01'::date, 1) AS rec, "
+            "(SELECT avg(price) FROM shop.products) AS avg_price",
+            max_rows=1,
+        )
+    finally:
+        await db.aclose()
+    far, bc, inf, tz, ts, r, a, rec, avg_price = res.rows[0]
+    assert (far, bc, inf) == ("10000-01-01", "0044-03-15 BC", "infinity")
+    assert tz == "2026-01-01T08:00:00+08:00" and ts == "2026-01-01T08:30:00"
+    assert r == "[2026-01-01,2026-02-01)" and a == ["2026-01-01", None]
+    assert rec == ["2026-01-01", 1]
+    assert isinstance(avg_price, float)  # numeric's long tail, as a number
+
+
+async def test_timestamptz_follows_the_servers_time_zone_by_default() -> None:
+    db = Database("shop", Connection(url_env=URL_ENV), Limits())
+    try:
+        res = await db.run(
+            "SELECT t, to_char(t, 'YYYY-MM-DD\"T\"HH24:MI:SS') AS local "
+            "FROM (SELECT '2026-01-01 00:00+00'::timestamptz AS t) x",
+            max_rows=1,
+        )
+    finally:
+        await db.aclose()
+    t, local = res.rows[0]
+    assert t.startswith(local)  # shown as SQL sees it, not as UTC
+
+
+async def test_an_iso_offset_means_east_of_utc() -> None:
+    # PostgreSQL alone would read '+08:00' as eight hours *west*.
+    db = Database("shop", Connection(url_env=URL_ENV, timezone="+08:00"), Limits())
+    try:
+        res = await db.run(
+            "SELECT t, to_char(t, 'HH24') AS hour "
+            "FROM (SELECT '2026-01-01 00:00+00'::timestamptz AS t) x",
+            max_rows=1,
+        )
+    finally:
+        await db.aclose()
+    assert res.rows == [["2026-01-01T08:00:00+08:00", "08"]]
+
+
+async def test_our_own_time_limits_stay_with_their_statement() -> None:
+    db = Database("shop", Connection(url_env=URL_ENV), Limits(statement_timeout_s=1))
+    try:
+        with pytest.raises(ToolError) as exc:
+            await db.run("SELECT pg_sleep(1)", max_rows=1, checked=False, timeout_s=0.05)
+        assert "took too long" in (exc.value.hint or "")
+        assert (await db.run("SHOW statement_timeout", max_rows=1)).rows == [["1s"]]
+    finally:
+        await db.aclose()
+
+
+async def test_describe_skips_samples_out_of_time(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(plugin, "DESCRIBE_BUDGET_S", 0)
+    (out,), _, _ = await _run(
+        _settings(tmp_path), call("describe_tables", {"tables": ["orders", "refunds"]})
+    )
+    # The columns still come back; keys and samples wait for a call of their own.
+    assert out.output.count("keys and sample rows: skipped") == 2
+    assert "- status text not null" in out.output and "primary key" not in out.output
 
 
 def test_the_app_serves_the_page_and_guards_the_results(tmp_path: Path) -> None:

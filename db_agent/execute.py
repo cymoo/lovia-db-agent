@@ -5,27 +5,40 @@ statement timeout and time zone set — at connection startup, outside any
 transaction (a PostgreSQL ``SET`` inside a transaction is undone by the
 rollback that ends it). The guard rejects ``SET`` and ``set_config()``, so a
 statement can't change them back.
+
+Every wait is bounded — connecting, a pool slot, the statement — and every
+failure of a model-written statement leaves :meth:`Database.run` as a
+:class:`ToolError` with a hint, never as a bare driver exception.
 """
 
 from __future__ import annotations
 
+import asyncio
+import logging
 import re
 import time
-from collections.abc import Mapping, Sequence
+from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any
 
 import sqlalchemy.exc as sa_exc
 from lovia import ToolError, UserError
-from sqlalchemy import text
+from sqlalchemy import bindparam, event, text
 from sqlalchemy.engine import make_url
-from sqlalchemy.ext.asyncio import AsyncEngine, create_async_engine
+from sqlalchemy.ext.asyncio import AsyncConnection, AsyncEngine, create_async_engine
 
-from . import guard
+from . import guard, pgtypes
 from .config import Connection, Limits
-from .convert import parse_tz, to_json
+from .convert import to_json
 
-__all__ = ["Database", "QueryResult"]
+__all__ = ["DB_WAIT_S", "Database", "QueryResult"]
+
+logger = logging.getLogger(__name__)
+
+CONNECT_TIMEOUT_S = 10
+POOL_TIMEOUT_S = 10
+DB_WAIT_S = CONNECT_TIMEOUT_S + POOL_TIMEOUT_S
+"""The most a statement waits before it starts: a pool slot, then a connection."""
 
 _SYSTEM_SCHEMAS = {
     "postgres": ("pg_catalog", "information_schema"),
@@ -61,7 +74,6 @@ class Database:
         self._url = url
         self._engine: AsyncEngine | None = None
         self.version = ""
-        self._tz = parse_tz(connection.timezone)
 
     @property
     def label(self) -> str:
@@ -84,46 +96,62 @@ class Database:
     @property
     def engine(self) -> AsyncEngine:
         if self._engine is None:
-            self._engine = create_async_engine(
+            engine = create_async_engine(
                 self._url,
                 pool_size=5,
                 max_overflow=5,
                 pool_pre_ping=True,
                 pool_recycle=1800,
-                pool_timeout=10,
+                pool_timeout=POOL_TIMEOUT_S,
                 connect_args=self._session_args(),
             )
+            if self.dialect == "postgres":
+
+                @event.listens_for(engine.sync_engine, "connect")
+                def _codecs(dbapi_conn: Any, _record: Any) -> None:
+                    dbapi_conn.run_async(pgtypes.register)
+
+            self._engine = engine
         return self._engine
 
     def _session_args(self) -> dict[str, Any]:
-        ms = int(self.limits.statement_timeout_s * 1000)
+        ms = _ms_of(self.limits.statement_timeout_s)
         tz = self.config.timezone
         if self.dialect == "postgres":
             settings = {"default_transaction_read_only": "on", "statement_timeout": str(ms)}
             if tz:
-                settings["TimeZone"] = tz
-            return {"server_settings": settings}
+                settings["TimeZone"] = _pg_time_zone(tz)
+            return {"server_settings": settings, "timeout": CONNECT_TIMEOUT_S}
         # One SET statement: init_command runs without multi-statement support.
         sets = ["SESSION transaction_read_only = 1", f"SESSION max_execution_time = {ms}"]
         if tz:
             sets.append(f"time_zone = '{tz}'")  # validated in config.py
-        return {"init_command": "SET " + ", ".join(sets)}
+        return {"init_command": "SET " + ", ".join(sets), "connect_timeout": CONNECT_TIMEOUT_S}
 
     def quote(self, *parts: str) -> str:
         """A qualified identifier in this dialect's quoting."""
         q = self.engine.dialect.identifier_preparer.quote_identifier
         return ".".join(q(p) for p in parts)
 
-    async def run(self, sql: str, *, max_rows: int, checked: bool = True) -> QueryResult:
+    async def run(
+        self,
+        sql: str,
+        *,
+        max_rows: int,
+        checked: bool = True,
+        timeout_s: float | None = None,
+    ) -> QueryResult:
         """Run a model-written statement (``checked``) or one of ours.
 
         At most ``max_rows`` rows come back; ``truncated`` says whether there
-        were more. Database errors become :class:`ToolError`s with a hint.
+        were more. ``timeout_s`` replaces the statement timeout for one of our
+        own SELECTs. Any failure becomes a :class:`ToolError` with a hint.
         """
         stmt = guard.prepare(sql, self.dialect, max_rows + 1) if checked else sql
         start = time.perf_counter()
         try:
             async with self.engine.connect() as conn:
+                stmt = await self._bound(conn, stmt, timeout_s)
                 # exec_driver_sql: the text goes to the driver as is, so a
                 # literal like '12:30' or '%x%' isn't read as a bind parameter.
                 result = await conn.exec_driver_sql(stmt, execution_options={"no_parameters": True})
@@ -131,24 +159,40 @@ class Database:
                     return QueryResult([], [], False, _ms(start))
                 columns = [str(c) for c in result.keys()]
                 rows = result.fetchmany(max_rows + 1)
-        except sa_exc.DBAPIError as exc:
+                cells = [[to_json(v) for v in r] for r in rows[:max_rows]]
+        except Exception as exc:  # noqa: BLE001 - every failure reaches the model as a ToolError
             raise self._tool_error(exc) from None
-        except (sa_exc.TimeoutError, OSError) as exc:
-            raise ToolError(
-                f"{self.name} is unreachable or busy: {type(exc).__name__}",
-                hint="retry once shortly; if it keeps failing, tell the user",
-            ) from None
-        return QueryResult(
-            columns,
-            [[to_json(v, self._tz) for v in r] for r in rows[:max_rows]],
-            len(rows) > max_rows,
-            _ms(start),
-        )
+        return QueryResult(columns, cells, len(rows) > max_rows, _ms(start))
 
-    async def fetch(self, sql: str, params: Mapping[str, Any] | None = None) -> Sequence[Any]:
-        """Rows of one of our own (trusted, parameterized) queries."""
+    async def fetch(
+        self,
+        sql: str,
+        params: Mapping[str, Any] | None = None,
+        *,
+        expanding: Iterable[str] = (),
+        timeout_s: float | None = None,
+    ) -> Sequence[Any]:
+        """Rows of one of our own (trusted, parameterized) queries.
+
+        ``expanding`` names list parameters (``IN :names``); ``timeout_s`` as
+        in :meth:`run`. Errors propagate as they are.
+        """
         async with self.engine.connect() as conn:
-            return (await conn.execute(text(sql), dict(params or {}))).all()
+            sql = await self._bound(conn, sql, timeout_s)
+            stmt = text(sql).bindparams(*(bindparam(n, expanding=True) for n in expanding))
+            return (await conn.execute(stmt, dict(params or {}))).all()
+
+    async def _bound(self, conn: AsyncConnection, sql: str, timeout_s: float | None) -> str:
+        """Give one statement of ours its own time limit, longer or shorter
+        than the session's: PostgreSQL by ``SET LOCAL`` (undone when the
+        connection returns to the pool), MySQL by an optimizer hint."""
+        if timeout_s is None:
+            return sql
+        ms = _ms_of(timeout_s)
+        if self.dialect == "postgres":
+            await conn.exec_driver_sql(f"SET LOCAL statement_timeout = {ms}")
+            return sql
+        return _SELECT.sub(rf"\g<0> /*+ MAX_EXECUTION_TIME({ms}) */", sql, count=1)
 
     async def load_version(self) -> str:
         sql = "SHOW server_version" if self.dialect == "postgres" else "SELECT VERSION()"
@@ -161,15 +205,30 @@ class Database:
             await self._engine.dispose()
             self._engine = None
 
-    def _tool_error(self, exc: sa_exc.DBAPIError) -> ToolError:
-        message = self._scrub(_message(exc))
-        return ToolError(f"{self.name}: {message}", hint=_hint(_code(exc)))
+    def _tool_error(self, exc: Exception) -> ToolError:
+        if isinstance(exc, sa_exc.DBAPIError) and not exc.connection_invalidated:
+            message = self._scrub(_message(exc))
+            return ToolError(f"{self.name}: {message}", hint=_hint(_code(exc)))
+        if isinstance(exc, (sa_exc.DBAPIError, sa_exc.TimeoutError, OSError, asyncio.TimeoutError)):
+            # A lost connection, no pool slot, a refused or slow connect.
+            message = f"{self.name} is unreachable or busy: {type(exc).__name__}"
+            return ToolError(message, hint=_RETRY)
+        # Not the database's error: the driver failed to read a value, say.
+        logger.warning("%s: unexpected error running a statement", self.name, exc_info=exc)
+        return ToolError(
+            f"{self.name}: {type(exc).__name__}: {self._scrub(str(exc))[:300]}",
+            hint="if a column has an unusual type, cast it to text in SQL; otherwise " + _RETRY,
+        )
 
     def _scrub(self, message: str) -> str:
         for secret in (self._url.password, self._url.username, self._url.host):
             if secret and len(str(secret)) > 2:
                 message = message.replace(str(secret), "***")
         return message
+
+
+_SELECT = re.compile(r"^\s*SELECT\b", re.I)
+_RETRY = "retry once shortly; if it keeps failing, tell the user"
 
 
 def _message(exc: sa_exc.DBAPIError) -> str:
@@ -230,5 +289,23 @@ def _hint(code: str) -> str:
     return _HINTS.get(code, "fix the SQL and try again")
 
 
+def _pg_time_zone(tz: str) -> str:
+    """An ISO offset as PostgreSQL means it: it reads ``+08:00`` POSIX-style,
+    as eight hours *west* of UTC, so east must be spelled ``UTC-08:00``."""
+    m = _OFFSET.fullmatch(tz)
+    if not m:
+        return tz  # a zone name
+    sign = "-" if m.group(1) == "+" else "+"
+    return f"UTC{sign}{m.group(2)}:{m.group(3)}"
+
+
+_OFFSET = re.compile(r"([+-])(\d{1,2}):?(\d{2})")
+
+
 def _ms(start: float) -> int:
     return int((time.perf_counter() - start) * 1000)
+
+
+def _ms_of(seconds: float) -> int:
+    # At least 1: zero means "no limit" to both servers.
+    return max(1, int(seconds * 1000))

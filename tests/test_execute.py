@@ -2,9 +2,10 @@
 
 from __future__ import annotations
 
+import pytest
 import sqlalchemy.exc as sa_exc
 
-from db_agent.execute import _code, _hint
+from db_agent.execute import _code, _hint, _pg_time_zone
 
 
 class _MySQLError(Exception):
@@ -28,3 +29,16 @@ def test_postgres_sqlstate() -> None:
 def test_unknown_errors_get_a_generic_hint() -> None:
     exc = sa_exc.DBAPIError("…", None, Exception("boom"))
     assert _code(exc) == "" and _hint("") == "fix the SQL and try again"
+
+
+@pytest.mark.parametrize(
+    ("iso", "postgres"),
+    [
+        ("+08:00", "UTC-08:00"),  # PostgreSQL reads offsets POSIX-style: east is negative
+        ("-05:30", "UTC+05:30"),
+        ("+0545", "UTC-05:45"),
+        ("Asia/Shanghai", "Asia/Shanghai"),
+    ],
+)
+def test_postgres_time_zone_offsets(iso: str, postgres: str) -> None:
+    assert _pg_time_zone(iso) == postgres

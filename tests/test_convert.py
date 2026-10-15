@@ -8,6 +8,7 @@ import uuid
 from decimal import Decimal
 
 import pytest
+from asyncpg import Range
 
 from db_agent.convert import MAX_CELL_CHARS, parse_tz, to_json
 
@@ -25,7 +26,12 @@ from db_agent.convert import MAX_CELL_CHARS, parse_tz, to_json
         (float("inf"), None),
         (Decimal("12.50"), 12.5),
         (Decimal("100"), 100),
-        (Decimal("1234567890.1234567"), "1234567890.1234567"),  # 17 digits
+        # An average's tail is noise: 15 significant digits, as a number.
+        (Decimal("1234567890.1234567"), 1234567890.12346),
+        (Decimal("3.333333333333333333333333"), 3.33333333333333),
+        (Decimal("12345678901234567.5"), "12345678901234567.5"),  # the integer part wouldn't fit
+        (Decimal("12345678901234567"), "12345678901234567"),
+        (Decimal("1E+3"), 1000),
         (Decimal("NaN"), None),
         (dt.date(2026, 10, 1), "2026-10-01"),
         (
@@ -36,6 +42,9 @@ from db_agent.convert import MAX_CELL_CHARS, parse_tz, to_json
         (b"\x00" * 2048, "<binary 2.0 KB>"),
         (uuid.UUID(int=1), "00000000-0000-0000-0000-000000000001"),
         ({"a": [1, Decimal("2.5")]}, {"a": [1, 2.5]}),
+        (Range("2026-01-01", "2026-02-01"), "[2026-01-01,2026-02-01)"),
+        (Range(1, None), "[1,)"),
+        (Range(empty=True), "empty"),
     ],
 )
 def test_to_json(value: object, expected: object) -> None:
@@ -44,11 +53,9 @@ def test_to_json(value: object, expected: object) -> None:
     json.dumps(out, allow_nan=False)
 
 
-def test_aware_datetimes_show_in_the_connection_time_zone() -> None:
-    utc = dt.datetime(2026, 1, 1, 16, 0, tzinfo=dt.timezone.utc)
-    assert to_json(utc, parse_tz("Asia/Shanghai")) == "2026-01-02T00:00:00+08:00"
-    assert to_json(utc, parse_tz("-05:30")) == "2026-01-01T10:30:00-05:30"
-    assert to_json(dt.datetime(2026, 1, 1), parse_tz("+08:00")) == "2026-01-01T00:00:00"  # naive
+def test_time_zones_by_name_or_offset() -> None:
+    assert str(parse_tz("Asia/Shanghai")) == "Asia/Shanghai"
+    assert parse_tz("-05:30") == dt.timezone(-dt.timedelta(hours=5, minutes=30))
     assert parse_tz("Not/AZone") is None and parse_tz(None) is None
 
 

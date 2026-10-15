@@ -1,8 +1,10 @@
 """Database values → JSON a browser reads faithfully.
 
 `ui_result` refuses NaN, and a JavaScript number holds 53 bits: a bigint id
-or a long decimal would silently change in the page. Such values become
-strings; dates become ISO 8601; binary becomes a size note.
+would silently change in the page, so it becomes a string. Decimals become
+numbers when their integer part fits a double (an average's 20th digit is
+noise), strings when it doesn't. Dates become ISO 8601 (PostgreSQL's arrive
+as text already, see pgtypes.py); binary becomes a size note.
 """
 
 from __future__ import annotations
@@ -15,20 +17,18 @@ from decimal import Decimal
 from typing import Any
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
+from asyncpg import Range, Record
+
 __all__ = ["MAX_CELL_CHARS", "parse_tz", "to_json"]
 
 MAX_CELL_CHARS = 500
 _SAFE_INT = 2**53
+# Significant digits a double carries faithfully.
+_DOUBLE_DIGITS = 15
 
 
-def to_json(v: Any, tz: dt.tzinfo | None = None) -> Any:
-    """One cell as a JSON-safe value: str, int, float, bool, None, list or dict.
-
-    An aware datetime is shown in ``tz`` when given — asyncpg decodes
-    ``timestamptz`` as UTC whatever the session's time zone.
-    """
-    if tz is not None and isinstance(v, dt.datetime) and v.tzinfo is not None:
-        v = v.astimezone(tz)
+def to_json(v: Any) -> Any:
+    """One cell as a JSON-safe value: str, int, float, bool, None, list or dict."""
     if v is None or isinstance(v, bool):
         return v
     if isinstance(v, int):
@@ -38,10 +38,13 @@ def to_json(v: Any, tz: dt.tzinfo | None = None) -> Any:
     if isinstance(v, Decimal):
         if not v.is_finite():
             return None
-        # 15 significant digits round-trip through a double; more would not.
-        if len(v.as_tuple().digits) > 15:
+        if v == v.to_integral_value():
+            return int(v) if abs(v) < _SAFE_INT else str(v)
+        # An integer part past 15 digits would change; digits past the 15th
+        # significant one are rounding noise (avg(), numeric division).
+        if v.adjusted() >= _DOUBLE_DIGITS:
             return str(v)
-        return int(v) if v == v.to_integral_value() and abs(v) < _SAFE_INT else float(v)
+        return float(f"{v:.{_DOUBLE_DIGITS}g}")
     if isinstance(v, str):
         return _clip(v)
     if isinstance(v, (dt.datetime, dt.date, dt.time)):
@@ -50,11 +53,13 @@ def to_json(v: Any, tz: dt.tzinfo | None = None) -> Any:
         return v.total_seconds()
     if isinstance(v, (bytes, bytearray, memoryview)):
         return f"<binary {_size(len(v))}>"
-    if isinstance(v, dict):
-        return _clip_json({str(k): to_json(x, tz) for k, x in v.items()})
+    if isinstance(v, (dict, Record)):
+        return _clip_json({str(k): to_json(x) for k, x in v.items()})
     if isinstance(v, (list, tuple)):
-        return _clip_json([to_json(x, tz) for x in v])
-    return _clip(str(v))  # UUID, IP addresses, enums, ranges, …
+        return _clip_json([to_json(x) for x in v])
+    if isinstance(v, Range):
+        return _range(v)
+    return _clip(str(v))  # UUID, IP addresses, enums, …
 
 
 def parse_tz(name: str | None) -> dt.tzinfo | None:
@@ -69,6 +74,21 @@ def parse_tz(name: str | None) -> dt.tzinfo | None:
         return ZoneInfo(name)
     except (ZoneInfoNotFoundError, ValueError):
         return None
+
+
+def _range(r: Range) -> str:
+    """PostgreSQL's own spelling: ``[2026-01-01,2026-02-01)``, ``empty``."""
+    if r.isempty:
+        return "empty"
+
+    def bound(v: Any) -> str:
+        return "" if v is None else str(to_json(v))
+
+    return (
+        ("[" if r.lower_inc else "(")
+        + f"{bound(r.lower)},{bound(r.upper)}"
+        + ("]" if r.upper_inc else ")")
+    )
 
 
 def _clip(s: str) -> str:
