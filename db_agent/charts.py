@@ -82,19 +82,58 @@ def apply_split(
         xs.setdefault(xk, r[xx])
         runs[c].append(xk)
 
-    names = _dimension_names(labels, taken={x_name})
+    # The legend toggles series by name: 1 and "1", or NULL and "(null)",
+    # need names of their own. Dataset columns also can't reuse the x column.
+    series_names = _distinct([NULL_LABEL if c is None else str(c) for c in labels], taken=set())
+    names = _distinct(series_names, taken={x_name})
     order = _merge_orders(list(xs), runs)
     wide = [[xs[k], *(cells.get((k, c)) for c in range(len(labels)))] for k in order]
     out = copy.deepcopy(option)
     out["series"] = [
         {
             **copy.deepcopy(template),
-            "name": NULL_LABEL if label is None else str(label),
+            "name": series_name,
             "encode": {"y": x_name, "x": name} if swap else {"x": x_name, "y": name},
         }
-        for label, name in zip(labels, names, strict=True)
+        for series_name, name in zip(series_names, names, strict=True)
     ]
+    _type_axes(out, template, horizontal=swap)
     return out, [x_name, *names], wide
+
+
+def _type_axes(option: dict[str, Any], template: dict[str, Any], *, horizontal: bool) -> None:
+    """Give the series' axes the types its orientation needs, where unset.
+
+    ECharts defaults xAxis to category and yAxis to value: a horizontal bar
+    needs both the other way round.
+    """
+    if template.get("coordinateSystem", "cartesian2d") != "cartesian2d":
+        return
+    kinds = {"x": "value", "y": "category"} if horizontal else {"x": "category", "y": "value"}
+    for dim, kind in kinds.items():
+        if option.get(f"{dim}Axis") is None and template.get(f"{dim}AxisIndex", 0) == 0:
+            option[f"{dim}Axis"] = {}
+        axis = _axis(option, template, dim)
+        if axis is not None:
+            axis.setdefault("type", kind)
+
+
+def _axis(option: dict[str, Any], template: dict[str, Any], dim: str) -> dict[str, Any] | None:
+    """The x or y axis the series is drawn on, by its xAxisIndex / yAxisIndex."""
+    axes = option.get(f"{dim}Axis")
+    i = template.get(f"{dim}AxisIndex", 0)
+    if isinstance(axes, dict):
+        axes = [axes]
+    if not isinstance(axes, list) or not isinstance(i, int) or not 0 <= i < len(axes):
+        return None
+    axis = axes[i]
+    return axis if isinstance(axis, dict) else None
+
+
+def _horizontal(option: dict[str, Any], template: dict[str, Any]) -> bool:
+    """When the data can't tell, a category y axis makes bars horizontal."""
+    axis = _axis(option, template, "y")
+    return axis is not None and axis.get("type") == "category"
 
 
 def _template(option: dict[str, Any]) -> dict[str, Any]:
@@ -152,20 +191,22 @@ def _axes(
                 "inferred: which is x and which is y?",
                 hint=hint,
             )
-        numeric = [c for c in rest if _numeric(rows, columns.index(c))]
-        if len(numeric) != 1:
-            raise ToolError(
-                "the series has no encode, and it can't be inferred: "
-                + (
-                    f"both {rest[0]} and {rest[1]} are numbers"
-                    if numeric
-                    else f"neither {rest[0]} nor {rest[1]} is a number"
-                ),
-                hint=hint,
+        a, b = (_numeric(rows, columns.index(c)) for c in rest)
+        if a is None and b is None:
+            why = f"{rest[0]} and {rest[1]} are all NULL"
+        elif a == b:
+            why = (
+                f"both {rest[0]} and {rest[1]} are numbers"
+                if a
+                else f"neither {rest[0]} nor {rest[1]} is a number"
             )
-        (value,) = numeric
-        (x,) = [c for c in rest if c != value]
-        return x, value, _axis_type(option.get("yAxis")) == "category"
+        else:
+            # The number is the value; an all-NULL column is the value too
+            # (an x of only NULLs makes no axis).
+            value = rest[0] if a is None or (a and b is False) else rest[1]
+            (x,) = [c for c in rest if c != value]
+            return x, value, _horizontal(option, template)
+        raise ToolError(f"the series has no encode, and it can't be inferred: {why}", hint=hint)
     x_ref, y_ref = (_one(encode.get(k)) if isinstance(encode, dict) else None for k in "xy")
     if x_ref is None or y_ref is None:
         raise ToolError(
@@ -187,10 +228,10 @@ def _axes(
     if x_ref == y_ref:
         raise ToolError(f"encode names {x_ref!r} as both x and y", hint=hint)
     x_num, y_num = (_numeric(rows, columns.index(c)) for c in (x_ref, y_ref))
-    if x_num != y_num:  # the number is the value
-        swap = x_num
-    else:  # both or neither: only the axes can tell
-        swap = _axis_type(option.get("yAxis")) == "category"
+    if x_num is not None and y_num is not None and x_num != y_num:
+        swap = x_num  # the number is the value
+    else:  # both numbers, neither, or a column of NULLs: only the axes can tell
+        swap = _horizontal(option, template)
     return (y_ref, x_ref, True) if swap else (x_ref, y_ref, False)
 
 
@@ -200,8 +241,8 @@ def _one(ref: Any) -> str | None:
     return ref if isinstance(ref, str) else None
 
 
-def _numeric(rows: list[list[Any]], i: int) -> bool:
-    """Every value a number (or NULL), and at least one."""
+def _numeric(rows: list[list[Any]], i: int) -> bool | None:
+    """Every value a number (or NULL); None when all are NULL — unknown."""
     seen = False
     for r in rows:
         v = r[i]
@@ -210,7 +251,7 @@ def _numeric(rows: list[list[Any]], i: int) -> bool:
         if isinstance(v, bool) or not isinstance(v, (int, float)):
             return False
         seen = True
-    return seen
+    return True if seen else None
 
 
 def _key(v: Any) -> Any:
@@ -220,16 +261,12 @@ def _key(v: Any) -> Any:
     return v
 
 
-def _dimension_names(labels: list[Any], *, taken: set[str]) -> list[str]:
-    """A distinct dataset column name per category.
-
-    ``1`` and ``"1"`` would both be ``"1"``, and a category may be named like
-    the x column: later ones get a suffix. The series keeps the plain label.
-    """
+def _distinct(bases: list[str], *, taken: set[str]) -> list[str]:
+    """The names, made distinct from each other and from ``taken``: a name
+    already used gets a suffix, ``"1 (2)"``."""
     names: list[str] = []
     used = set(taken)
-    for label in labels:
-        base = NULL_LABEL if label is None else str(label)
+    for base in bases:
         name, n = base, 2
         while name in used:
             name, n = f"{base} ({n})", n + 1
@@ -290,8 +327,3 @@ def summarize(columns: list[str], rows: list[list[Any]]) -> dict[str, Any]:
         "first_row": rows[0] if rows else None,
         "last_row": rows[-1] if rows else None,
     }
-
-
-def _axis_type(axis: Any) -> Any:
-    first = axis[0] if isinstance(axis, list) and axis else axis
-    return first.get("type") if isinstance(first, dict) else None

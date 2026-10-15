@@ -56,10 +56,31 @@ def test_without_encode_three_columns_are_inferred() -> None:
 
 
 def test_horizontal_bars_come_from_the_encode() -> None:
-    # No yAxis type: the numeric column is the value, whichever axis it's on.
-    out, columns, _ = split({"type": "bar", "encode": {"y": "month", "x": ["revenue"]}})
+    # No axis types: the numeric column is the value, whichever axis it's on,
+    # and the axes get the types a horizontal bar needs.
+    series = {"type": "bar", "encode": {"y": "month", "x": ["revenue"]}}
+    out, columns, _ = split(series, xAxis={}, yAxis={"name": "月份"})
     assert columns == ["month", "数码", "家居"]
     assert out["series"][1]["encode"] == {"y": "month", "x": "家居"}
+    assert out["xAxis"] == {"type": "value"}
+    assert out["yAxis"] == {"type": "category", "name": "月份"}
+    # Missing axes are added.
+    out, _, _ = split(series)
+    assert out["xAxis"] == {"type": "value"} and out["yAxis"] == {"type": "category"}
+
+
+def test_axis_types_keep_explicit_ones_and_follow_the_axis_index() -> None:
+    series = {"type": "bar", "yAxisIndex": 1, "encode": {"y": "month", "x": "revenue"}}
+    out, _, _ = split(series, xAxis={"type": "log"}, yAxis=[{}, {"position": "right"}])
+    assert out["xAxis"] == {"type": "log"}
+    assert out["yAxis"] == [{}, {"position": "right", "type": "category"}]
+    assert all(s["yAxisIndex"] == 1 for s in out["series"])
+    # Vertical: ECharts' own defaults, spelled out.
+    out, _, _ = split(LINE, xAxis={"type": "time"}, yAxis={})
+    assert out["xAxis"] == {"type": "time"} and out["yAxis"] == {"type": "value"}
+    # Off the cartesian grid, axes are left alone.
+    out, _, _ = split({**LINE, "coordinateSystem": "polar"})
+    assert "xAxis" not in out and "yAxis" not in out
 
 
 def test_numeric_x_and_y_fall_back_to_the_axes() -> None:
@@ -92,6 +113,19 @@ def test_each_categorys_x_order_is_kept() -> None:
     assert wide[1] == ["2026-02", None, 12]
 
 
+def test_an_all_null_measure_says_nothing_about_orientation() -> None:
+    rows = [[2025, "A", None], [2026, "A", None]]
+    cols = ["year", "kind", "revenue"]
+    series = {"type": "bar", "encode": {"x": "year", "y": "revenue"}}
+    out, _, wide = split(series, rows, cols, "kind", xAxis={"type": "category"})
+    assert out["series"][0]["encode"] == {"x": "year", "y": "A"}
+    assert wide == [[2025, None], [2026, None]]
+    # Without encode, the all-NULL column is the value.
+    for rows in ([[2025, "A", None]], [["2025", "A", None]]):
+        out, _, _ = split({"type": "bar"}, rows, cols, "kind")
+        assert out["series"][0]["encode"] == {"x": "year", "y": "A"}
+
+
 def test_contradicting_orders_fall_back_to_first_appearance() -> None:
     # Ordered by revenue: each category orders the months its own way.
     rows = [["a", "m1", 3], ["a", "m2", 2], ["b", "m2", 9], ["b", "m1", 1]]
@@ -100,12 +134,20 @@ def test_contradicting_orders_fall_back_to_first_appearance() -> None:
 
 
 def test_category_names_are_distinct_and_null_is_labeled() -> None:
-    rows = [["2026-01", "month", 1], ["2026-01", None, 2], ["2026-01", "(null)", 3]]
+    rows = [
+        ["2026-01", "month", 1],
+        ["2026-01", None, 2],
+        ["2026-01", "(null)", 3],
+        ["2026-01", 1, 4],
+        ["2026-01", "1", 5],
+    ]
     out, columns, wide = split(LINE, rows)
-    assert columns == ["month", "month (2)", "(null)", "(null) (2)"]
-    assert wide == [["2026-01", 1, 2, 3]]
-    # The legend shows the categories as they are.
-    assert [s["name"] for s in out["series"]] == ["month", "(null)", "(null)"]
+    assert columns == ["month", "month (2)", "(null)", "(null) (2)", "1", "1 (2)"]
+    assert wide == [["2026-01", 1, 2, 3, 4, 5]]
+    # Each category toggles on its own in the legend; only the dataset
+    # column of the one named like the x column changes.
+    names = [s["name"] for s in out["series"]]
+    assert names == ["month", "(null)", "(null) (2)", "1", "1 (2)"]
     assert [s["encode"]["y"] for s in out["series"]] == columns[1:]
     check_encode(out, columns)
 
@@ -158,6 +200,7 @@ def test_split_errors(split_by: str, series: Any, match: str, hint: str) -> None
         (["month", "category", "revenue", "orders"], [["m", "a", 1, 2]], "with 4 columns"),
         (["month", "category", "revenue"], [["m", "a", "1"]], "neither month nor revenue"),
         (["year", "category", "revenue"], [[2026, "a", 1]], "both year and revenue"),
+        (["month", "category", "revenue"], [[None, "a", None]], "all NULL"),
     ],
 )
 def test_encode_is_inferred_only_when_unambiguous(
