@@ -59,3 +59,29 @@ def test_scrubbing_takes_whole_words(monkeypatch: pytest.MonkeyPatch) -> None:
         "(sqlalchemy.dialects.postgresql.asyncpg.Error) role *** denied; "
         '用户***认证失败; host ***:5432; password "***"'
     )
+
+
+def test_names_are_scrubbed_before_sentence_punctuation(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("DB_AGENT_SCRUB_URL", "postgresql+asyncpg://agent:s3cret@db.internal/x")
+    db = Database("x", Connection(url_env="DB_AGENT_SCRUB_URL"), Limits())
+    assert db.scrub("password s3cret. host db.internal. user agent.") == (
+        "password ***. host ***. user ***."
+    )
+    # The password goes even inside a longer word; names only when whole.
+    assert db.scrub("xs3cretx db.internal.example agent.name agents") == (
+        "x***x db.internal.example agent.name agents"
+    )
+
+
+def test_messages_are_scrubbed_before_they_are_cut(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("DB_AGENT_SCRUB_URL", "postgresql+asyncpg://agent:s3cret@db.internal/x")
+    db = Database("x", Connection(url_env="DB_AGENT_SCRUB_URL"), Limits())
+    # The password straddles each cut: 300 characters for other errors, 500
+    # for the driver's.
+    other = db.error_text(ValueError("x" * 296 + " s3cret end"))
+    driver = db.error_text(
+        sa_exc.ProgrammingError("SELECT 1", {}, Exception("y" * 496 + " s3cret"))
+    )
+    for text in (other, driver):
+        assert "s3c" not in text and "***" in text
+    assert "s3c" not in str(db._tool_error(ValueError("z" * 296 + " s3cret end")))
