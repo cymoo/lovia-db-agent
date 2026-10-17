@@ -28,7 +28,9 @@ pytestmark = pytest.mark.skipif(not os.environ.get(URL_ENV), reason=f"set {URL_E
 
 def _settings(tmp_path: Path) -> Settings:
     return Settings(
-        connections={"shop": Connection(url_env=URL_ENV, timezone="+08:00")}, data_dir=tmp_path
+        connections={"shop": Connection(url_env=URL_ENV, timezone="+08:00")},
+        data_dir=tmp_path,
+        memory=False,  # its curation would call the scripted model
     )
 
 

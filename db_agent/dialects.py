@@ -1,9 +1,9 @@
 """Everything that differs between PostgreSQL and MySQL, in one place.
 
 A :class:`Dialect` holds what the rest of the code needs to know about a
-server: how to open a read-only, time-boxed session, how to bound one
-statement, where the catalog lives, what its error codes mean and what the
-model should know about its SQL. The other modules ask the connection's
+server: how to open a session, how to bound one statement, where the
+catalog lives, what its error codes mean and what the model should know
+about its SQL. The other modules ask the connection's
 dialect and never branch on which one it is.
 """
 
@@ -34,14 +34,18 @@ class Dialect:
     schema_is_database: bool
     """MySQL's schemas are databases: with none configured, discover the URL's."""
     session_args: Callable[[int, str | None, int], dict[str, Any]]
-    """``connect_args`` for a read-only session, given the statement timeout
-    (ms), the time zone (validated in config.py, or None) and the connect
-    timeout (s)."""
+    """``connect_args`` for a session, given the statement timeout (ms), the
+    time zone (validated in config.py, or None) and the connect timeout (s)."""
     bound: Callable[[str, int], tuple[str | None, str]]
     """Give one statement its own time limit (ms): a statement to run first
     on the same connection (or None), and the statement to run."""
+    bound_each: bool
+    """The session carries no statement timeout: :attr:`bound` gives every
+    statement the configured one."""
     version_sql: str
     """One row, one column: the version first, maybe more after a space."""
+    read_only_sql: str
+    """One row, one column: "on" or 1 when the session can't write."""
     tables_sql: str
     """Rows of (schema, table, "table" | "view", comment, estimated rows).
     ``:system`` is the system schemas; ``{filter}`` is where load_catalog adds
@@ -106,12 +110,15 @@ _GROUP_BY = "every selected column must be in GROUP BY or inside an aggregate"
 
 
 def _pg_session_args(timeout_ms: int, tz: str | None, connect_timeout_s: int) -> dict[str, Any]:
-    # Server settings apply at startup, outside any transaction: a SET inside
-    # one would be undone by the rollback that ends it.
-    settings = {"default_transaction_read_only": "on", "statement_timeout": str(timeout_ms)}
+    # No read-only or statement_timeout startup parameters: poolers such as
+    # PgBouncer and some hosted servers refuse them. The account is read-only
+    # (see the README), and every statement gets its limit from _pg_bound.
+    # TimeZone applies at startup, outside any transaction: a SET inside one
+    # would be undone by the rollback that ends it.
+    args: dict[str, Any] = {"timeout": connect_timeout_s}
     if tz:
-        settings["TimeZone"] = _pg_time_zone(tz)
-    return {"server_settings": settings, "timeout": connect_timeout_s}
+        args["server_settings"] = {"TimeZone": _pg_time_zone(tz)}
+    return args
 
 
 def _pg_bound(sql: str, ms: int) -> tuple[str | None, str]:
@@ -198,7 +205,9 @@ POSTGRES = Dialect(
     schema_is_database=False,
     session_args=_pg_session_args,
     bound=_pg_bound,
+    bound_each=True,
     version_sql="SHOW server_version",
+    read_only_sql="SHOW transaction_read_only",
     tables_sql=_PG_TABLES,
     columns_sql=_PG_COLUMNS,
     keys_sql=_PG_KEYS,
@@ -281,7 +290,9 @@ MYSQL = Dialect(
     schema_is_database=True,
     session_args=_mysql_session_args,
     bound=_mysql_bound,
+    bound_each=False,
     version_sql="SELECT VERSION()",
+    read_only_sql="SELECT @@SESSION.transaction_read_only",
     tables_sql=_MYSQL_TABLES,
     columns_sql=_MYSQL_COLUMNS,
     keys_sql=_MYSQL_KEYS,

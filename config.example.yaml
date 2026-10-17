@@ -22,6 +22,21 @@ skills_dir: skills
 # Where chats live (big results are kept with their chat).
 data_dir: .data
 
+# Notes the agent keeps across chats when asked: preferences, definitions.
+# Shared by everyone using this app; view and edit them on the Memory page.
+memory: true                    # or: {dir: notes}; default dir: <data_dir>/memory
+
+# A directory the agent reads and writes files in (the page's Files panel).
+workspace:
+  # dir: workspace              # default: <data_dir>/workspace
+  mode: coding                  # readonly: read only | coding: shell commands wait
+                                # for your approval | trusted: shell runs unasked
+# workspace: false              # no file or shell tools
+
+# title: Data analyst           # the page's title
+# followups: false              # suggest follow-up questions (a model call per answer)
+# max_turns: 30                 # most model turns in one answer
+
 # limits:
 #   statement_timeout_s: 15     # server-side cap per statement
 #   query_rows: 50              # rows the model sees from `query`

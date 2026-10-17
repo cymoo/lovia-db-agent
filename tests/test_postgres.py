@@ -45,6 +45,7 @@ def _settings(tmp_path: Path, **limits: Any) -> Settings:
         },
         limits=Limits(**limits),
         data_dir=tmp_path,
+        memory=False,  # its curation would call the scripted model
     )
 
 

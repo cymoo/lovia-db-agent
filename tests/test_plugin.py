@@ -26,7 +26,9 @@ async def test_a_down_database_is_reported_and_not_hammered(
     # Nothing listens on port 9: the connection is refused at once.
     monkeypatch.setenv("DB_AGENT_DOWN_URL", url)
     settings = Settings(
-        connections={"down": Connection(url_env="DB_AGENT_DOWN_URL")}, data_dir=tmp_path
+        connections={"down": Connection(url_env="DB_AGENT_DOWN_URL")},
+        data_dir=tmp_path,
+        memory=False,
     )
     provider = ScriptedProvider(
         [call("search_schema", {"query": "x"}), call("query", {"sql": "SELECT 1"}), text("done")]

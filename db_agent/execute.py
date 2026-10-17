@@ -1,10 +1,12 @@
 """Run statements against one configured database, read-only and time-boxed.
 
-Every connection in the pool starts its session read-only, with the
-statement timeout and time zone set — at connection startup, outside any
-transaction (a PostgreSQL ``SET`` inside a transaction is undone by the
-rollback that ends it). The guard rejects ``SET`` and ``set_config()``, so a
-statement can't change them back.
+Every statement runs with the configured time limit: MySQL sessions start
+read-only with ``max_execution_time`` set; PostgreSQL bounds each statement
+with ``SET LOCAL statement_timeout`` (poolers refuse those settings at
+startup) and relies on the read-only account. The time zone is set at
+connection startup, outside any transaction (a PostgreSQL ``SET`` inside a
+transaction is undone by the rollback that ends it). The guard rejects
+``SET`` and ``set_config()``, so a statement can't change them back.
 
 Every wait is bounded — connecting, a pool slot, the statement — on the
 server and again on the client: a server-side limit can't end a read from a
@@ -24,7 +26,7 @@ from dataclasses import dataclass
 from typing import Any
 
 import sqlalchemy.exc as sa_exc
-from lovia import ToolError
+from lovia import ToolError, UserError
 from sqlalchemy import bindparam, event, text
 from sqlalchemy.engine import make_url
 from sqlalchemy.ext.asyncio import AsyncConnection, AsyncEngine, create_async_engine
@@ -65,7 +67,15 @@ class Database:
         self.name = name
         self.config = connection
         self.limits = limits
-        url = make_url(connection.url())
+        try:
+            url = make_url(connection.url())
+        except (sa_exc.ArgumentError, ValueError):
+            # Not the URL or the parser's message: either may hold the password.
+            raise UserError(
+                f"{connection.url_env} is not a valid database URL",
+                hint="use postgresql+asyncpg://user:password@host:port/db "
+                "or mysql+asyncmy://user:password@host:port/db",
+            ) from None
         self.dialect: Dialect = for_backend(url.get_backend_name(), name)
         self._url = url
         self._engine: AsyncEngine | None = None
@@ -178,6 +188,9 @@ class Database:
 
         async def go() -> Any:
             async with self.engine.connect() as conn:
+                if self.dialect.bound_each:
+                    # Only the statement run first: the limit lasts the transaction.
+                    await self._bound(conn, "", None)
                 return await conn.run_sync(fn)
 
         return await asyncio.wait_for(go(), self.deadline(None, statements=statements))
@@ -187,10 +200,13 @@ class Database:
         return client_wait(limit, statements)
 
     async def _bound(self, conn: AsyncConnection, sql: str, timeout_s: float | None) -> str:
-        """Give one statement of ours its own time limit, longer or shorter
-        than the session's (see :attr:`Dialect.bound`)."""
+        """Give one statement its time limit: ``timeout_s`` for one of ours,
+        longer or shorter than the session's; else the configured one, when
+        the session doesn't carry it (see :attr:`Dialect.bound`)."""
         if timeout_s is None:
-            return sql
+            if not self.dialect.bound_each:
+                return sql
+            timeout_s = self.limits.statement_timeout_s
         first, sql = self.dialect.bound(sql, _ms_of(timeout_s))
         if first is not None:
             await conn.exec_driver_sql(first)
@@ -208,22 +224,23 @@ class Database:
 
     def _tool_error(self, exc: Exception) -> ToolError:
         if isinstance(exc, sa_exc.DBAPIError) and not _unreachable(exc, self.dialect):
-            message = self._scrub(_message(exc))
+            message = self.scrub(_message(exc))
             return ToolError(f"{self.name}: {message}", hint=self.dialect.hint(_code(exc)))
         if isinstance(exc, (sa_exc.DBAPIError, sa_exc.TimeoutError, OSError, asyncio.TimeoutError)):
             # A lost connection, no pool slot, a refused or slow connect, no answer.
             message = f"{self.name} is unreachable or busy: {type(exc).__name__}"
             if isinstance(exc, sa_exc.DBAPIError):
-                message += f" ({self._scrub(_message(exc))})"
+                message += f" ({self.scrub(_message(exc))})"
             return ToolError(message, hint=_RETRY)
         # Not the database's error: the driver failed to read a value, say.
         logger.warning("%s: unexpected error running a statement", self.name, exc_info=exc)
         return ToolError(
-            f"{self.name}: {type(exc).__name__}: {self._scrub(str(exc))[:300]}",
+            f"{self.name}: {type(exc).__name__}: {self.scrub(str(exc))[:300]}",
             hint="if a column has an unusual type, cast it to text in SQL; otherwise " + _RETRY,
         )
 
-    def _scrub(self, message: str) -> str:
+    def scrub(self, message: str) -> str:
+        """``message`` without the URL's password, user name and host."""
         for secret in (self._url.password, self._url.username, self._url.host):
             if secret and len(str(secret)) > 2:
                 message = message.replace(str(secret), "***")

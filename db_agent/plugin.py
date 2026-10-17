@@ -74,8 +74,9 @@ describe_tables (keys, indexes, common values, sample rows). Use names exactly a
 qualified with their schema; when unsure of a name or a value's spelling, look it up rather \
 than guess.
 - Explore with `query` — only you see its rows. Answer with `query_table` (a table for the \
-user) or `query_chart` (a chart for the user). Use show_chart only for data no single query \
-returns.
+user) or `query_chart` (a chart for the user). Use show_table or show_chart only for data \
+no single query returns, and show_html only for what a table or chart can't do (a what-if \
+calculator, a custom visual), with data from your queries, never made up.
 - Relative dates ("this month", "last week") count from today's date, stated in this prompt. \
 If such a query comes back empty, check where the data ends (MAX of the date column) before \
 saying there is none, and tell the user.
