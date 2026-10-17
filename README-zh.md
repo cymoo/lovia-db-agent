@@ -39,7 +39,7 @@ cp .env.example .env                       # 填 LOVIA_MODEL（及 API key）和
 
 可以试试："每个月的销售额走势"、"退款最多的商品 Top 10"、"最近的订单"。
 MySQL：`mysql -u root < examples/demo_mysql.sql`，连接串用 `mysql+asyncmy://`。
-不支持 MariaDB：它没有 `max_execution_time`，无法给每条查询限时。
+支持 PostgreSQL 11 及以上、MySQL 8。不支持 MariaDB：它没有 `max_execution_time`，无法给每条查询限时。
 
 ## 配置
 
@@ -125,7 +125,7 @@ DB_AGENT_TEST_MYSQL_URL=mysql+asyncmy://agent_ro:agent_ro@127.0.0.1:3306/demo_sh
 ruff check . && ruff format --check . && mypy
 ```
 
-CI 会在 PostgreSQL 16 和 MySQL 8.4 容器上跑集成测试。
+CI 会在 PostgreSQL 16、PostgreSQL 11（支持的最低版本）和 MySQL 8.4 容器上跑集成测试。
 
 ## 许可证
 

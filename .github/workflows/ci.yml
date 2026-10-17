@@ -62,3 +62,29 @@ jobs:
           python-version: ${{ matrix.python-version }}
       - run: uv pip install -e ".[dev]"
       - run: uv run --no-sync pytest -v -ra
+
+  # The oldest PostgreSQL we support: the catalog SQL must not use newer
+  # features (pg_partition_tree() is 12+, say).
+  test-postgres-11:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:11
+        env:
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: demo_shop
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U postgres" --health-interval 5s
+          --health-timeout 5s --health-retries 10
+    env:
+      DB_AGENT_TEST_PG_URL: postgresql+asyncpg://agent_ro:agent_ro@localhost:5432/demo_shop
+    steps:
+      - uses: actions/checkout@v4
+      - name: Load the demo data
+        run: PGPASSWORD=postgres psql -h localhost -U postgres -d demo_shop -v ON_ERROR_STOP=1 -q -f examples/demo_postgres.sql
+      - uses: astral-sh/setup-uv@v5
+        with:
+          python-version: "3.12"
+      - run: uv pip install -e ".[dev]"
+      - run: uv run --no-sync pytest -v -ra tests/test_postgres.py
