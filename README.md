@@ -17,10 +17,14 @@ copies a number. Built on [lovia](https://github.com/cymoo/lovia) and its web UI
   filter, copy and CSV. Charts with lots of points do the same.
 - **Charts from SQL.** The model writes the chart's shape; the rows fill it in.
   `split_by` turns `(month, category, revenue)` rows into one line per category.
-- **Read-only, three ways.** A read-only account (your job — see below), a
-  read-only session with a statement timeout on every connection, and a SQL
-  check that refuses writes and caps the outermost `LIMIT`.
+- **Read-only, in layers.** A read-only account (your job — see below), a
+  statement timeout on every query, and a SQL check that refuses writes and
+  caps the outermost `LIMIT`. MySQL sessions are read-only too.
 - **Business definitions** as plain `SKILL.md` files the agent reads when needed.
+- **Memory and a workspace.** The agent keeps notes across chats when you ask
+  or confirm (preferences, definitions; editable on the Memory page) and works in a directory
+  of files, shown in the Files panel. It can also show its own tables, and
+  interactive pages (`show_html`) such as a what-if calculator.
 
 ## Quick start (demo database)
 
@@ -32,6 +36,7 @@ createdb demo_shop && psql demo_shop -f examples/demo_postgres.sql
 cp config.example.yaml config.yaml
 cp .env.example .env                       # set LOVIA_MODEL (+ API key) and DB_DEMO_URL
 
+.venv/bin/lovia-db-agent check             # connects to each database, reports what it sees
 .venv/bin/lovia-db-agent                   # → http://127.0.0.1:8000
 ```
 
@@ -53,10 +58,27 @@ connections:
     timezone: Asia/Shanghai
 instructions: Reply in Chinese.
 skills_dir: skills
+memory: true                  # notes across chats, in <data_dir>/memory
+workspace:
+  mode: coding                # files in <data_dir>/workspace; shell commands need approval
 ```
 
-Serving beyond localhost needs `LOVIA_WEB_TOKEN` (or put it behind your own auth);
-`--host` / `--port` / `--config` are flags.
+Relative paths resolve against the config file. `.env` is read from the
+directory you run in.
+
+| Command | Does |
+| --- | --- |
+| `lovia-db-agent [serve]` | Serve the chat UI. `--config`, `--host`, `--port` (or `DB_AGENT_CONFIG` / `DB_AGENT_HOST` / `DB_AGENT_PORT`) |
+| `lovia-db-agent check` | Connect to every database as the agent will; report its version, how many tables it can read and whether sessions can write, or the error with a hint |
+
+Serving beyond localhost needs a login token: set `LOVIA_WEB_TOKEN`, or one is
+generated and its `/?token=...` link printed at startup. Or put the app
+behind your own auth.
+
+Memory is one set of notes for everyone using the app, and the workspace one
+directory for every chat. It holds only what the agent is told to remember:
+chats aren't archived or mined for facts, so query results don't end up there. Shell commands run with a minimal environment (no
+database URLs or API keys), and no tool may open a `.env` file.
 
 ## Prepare the database
 
@@ -68,6 +90,10 @@ This is the security boundary, so do it properly:
    queries and sample rows then all see the same thing. Column masking in SQL can
    be bypassed (`SELECT phone AS p`), so the agent doesn't pretend to do it.
 3. PostgreSQL: `ALTER ROLE agent_ro SET default_transaction_read_only = on;`
+   The app sends no session settings at connect time (poolers such as
+   PgBouncer refuse them; each statement gets its time limit with
+   `SET LOCAL`), so the role is what makes sessions read-only.
+   `lovia-db-agent check` warns when they can write.
 
 ## How it works
 
@@ -79,7 +105,9 @@ This is the security boundary, so do it properly:
 | `query_table` | the user | a table (`ui_result("table")`; when big, the model gets a preview) |
 | `query_chart` | the user | an ECharts chart from the rows (`split_by` for one series per category) |
 
-Plus lovia's `show_chart` (for data no single query returns) and `now`.
+Plus lovia's `show_table` and `show_chart` (for data no single query returns),
+`show_html` (an interactive page, sandboxed with no network), `now`, the
+workspace's file and shell tools, and memory's `remember` / `forget`.
 
 A big result stays out of the model's context: lovia's `put_ui_data` keeps
 the full rows with the chat (deleted with it), the model reads a preview with
