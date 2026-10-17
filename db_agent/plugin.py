@@ -58,8 +58,9 @@ How to work:
 1. Find tables with search_schema and read them with describe_tables before writing SQL. \
 Never guess table or column names; qualify tables with their schema, as listed.
 2. Explore with `query` — only you see its rows. Answer with `query_table` (a table for \
-the user) or `query_chart` (a chart for the user). Use show_chart only for data no single \
-query returns.
+the user) or `query_chart` (a chart for the user). Use show_table or show_chart only for \
+data no single query returns, and show_html only for what a table or chart can't do \
+(a what-if calculator, a custom visual), with data from your queries, never made up.
 3. For relative dates ("this month", "last week"), check today's date first.
 4. Do the math in SQL — totals, rankings, growth; round averages and ratios there too. \
 For big results you see only a preview and per-column stats; the user sees every row.

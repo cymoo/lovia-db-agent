@@ -46,14 +46,10 @@ def test_unsupported_servers_fail_at_startup(
 
 def test_postgres_session() -> None:
     args = POSTGRES.session_args(30_000, "+08:00", 10)
-    assert args == {
-        "server_settings": {
-            "default_transaction_read_only": "on",
-            "statement_timeout": "30000",
-            "TimeZone": "UTC-08:00",
-        },
-        "timeout": 10,
-    }
+    # Only what poolers such as PgBouncer accept at startup; each statement
+    # gets its own limit.
+    assert args == {"server_settings": {"TimeZone": "UTC-08:00"}, "timeout": 10}
+    assert POSTGRES.session_args(30_000, None, 10) == {"timeout": 10}
     assert POSTGRES.bound("SELECT 1", 500) == ("SET LOCAL statement_timeout = 500", "SELECT 1")
 
 

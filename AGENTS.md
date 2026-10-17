@@ -21,7 +21,8 @@ Paths are relative to the repository root. Start with the relevant entry points 
 
 | Task | Main entry points |
 | --- | --- |
-| Startup, configuration, agent assembly | `db_agent/__main__.py`, `db_agent/config.py`, `db_agent/app.py` |
+| Startup, configuration, agent assembly (memory, workspace, show tools) | `db_agent/__main__.py`, `db_agent/config.py`, `db_agent/app.py` |
+| `lovia-db-agent check`: configuration and connection self-test | `db_agent/check.py` |
 | Tool interfaces, prompts, result envelopes | `SQLDatabase` in `db_agent/plugin.py` |
 | Schema discovery, search, descriptions | `db_agent/catalog.py` |
 | SQL checks, execution, pools | `db_agent/guard.py`, `db_agent/execute.py` |
@@ -49,6 +50,8 @@ against real databases.
 - Table and chart data comes directly from query results; the model defines presentation structure.
   Reuse lovia's UI and `put_ui_data`. Large-result storage requires a chat context;
   a bare `Runner.run` without that context returns only the preview.
+- PostgreSQL connections send no startup settings except `TimeZone` (poolers refuse others);
+  each statement gets its limit with `SET LOCAL statement_timeout` (`Dialect.bound_each`).
 - `SQLDatabase.setup()` runs on every agent run. Keep connection pools and catalog caches
   on the plugin instance rather than recreating them for each run.
 - `skills/` holds business metric definitions used by the app at runtime.
@@ -63,6 +66,7 @@ The check definitions are in [.github/workflows/ci.yml](.github/workflows/ci.yml
   test module is skipped entirely. Validate shared database changes against both databases;
   passing unit tests alone is not full integration coverage.
 - Agent integration tests use `lovia.testing.ScriptedProvider` and need no real model API key.
+  Build their `Settings` with `memory=False`: memory curation would call the scripted model.
   For full UI result storage tests, follow the `ChatStore` / `UI_DATA_SINK` setup in
   `tests/test_postgres.py`.
 - Demo SQL drops and recreates PostgreSQL's `shop` schema or MySQL's `demo_shop` database.

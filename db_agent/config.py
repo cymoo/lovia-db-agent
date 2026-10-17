@@ -10,12 +10,20 @@ from __future__ import annotations
 import os
 import re
 from pathlib import Path
+from typing import Any, Literal
 
 import yaml
 from lovia import UserError
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, ValidationError, field_validator, model_validator
 
-__all__ = ["Connection", "Limits", "Settings", "load_settings"]
+__all__ = [
+    "Connection",
+    "Limits",
+    "MemorySettings",
+    "Settings",
+    "WorkspaceSettings",
+    "load_settings",
+]
 
 _NAME_RE = re.compile(r"[a-z][a-z0-9_]{0,31}")
 # A time zone as both PostgreSQL and MySQL spell it: a name or an offset.
@@ -76,6 +84,39 @@ class Limits(BaseModel):
     """How much of the system prompt the table list may take, all databases together."""
 
 
+class _Switch(BaseModel):
+    """A feature that ``true`` / ``false`` alone turns on or off."""
+
+    enabled: bool = True
+
+    @model_validator(mode="before")
+    @classmethod
+    def _from_bool(cls, v: Any) -> Any:
+        if isinstance(v, bool):
+            return {"enabled": v}
+        return {} if v is None else v
+
+
+class MemorySettings(_Switch):
+    """Notes the agent keeps across chats: the user's preferences, confirmed
+    definitions. Shared by everyone using this app; the page can edit them."""
+
+    dir: Path | None = None
+    """Default: ``<data_dir>/memory``."""
+
+
+class WorkspaceSettings(_Switch):
+    """A directory the agent reads and writes files in, shown in the page's
+    Files panel. Shared by every chat."""
+
+    dir: Path | None = None
+    """Default: ``<data_dir>/workspace``; created if missing."""
+    mode: Literal["readonly", "coding", "trusted"] = "coding"
+    """readonly: read files only. coding: write inside the directory; shell
+    commands and reads outside it wait for the user's approval. trusted:
+    shell commands run unasked."""
+
+
 class Settings(BaseModel):
     connections: dict[str, Connection]
     limits: Limits = Field(default_factory=Limits)
@@ -85,6 +126,22 @@ class Settings(BaseModel):
     """Where chats live (big results are kept with their chat)."""
     skills_dir: Path | None = None
     """A directory of SKILL.md files: business definitions, join paths, gotchas."""
+    memory: MemorySettings = Field(default_factory=MemorySettings)
+    workspace: WorkspaceSettings = Field(default_factory=WorkspaceSettings)
+    title: str = "Data analyst"
+    """The page's title."""
+    followups: bool = False
+    """Suggest follow-up questions after each answer (one more model call per answer)."""
+    max_turns: int = Field(30, ge=1)
+    """Most model turns in one answer."""
+
+    @property
+    def memory_dir(self) -> Path:
+        return self.memory.dir or self.data_dir / "memory"
+
+    @property
+    def workspace_dir(self) -> Path:
+        return self.workspace.dir or self.data_dir / "workspace"
 
     @field_validator("connections")
     @classmethod
@@ -109,9 +166,27 @@ def load_settings(path: str | Path) -> Settings:
             f"config file not found: {path}",
             hint="copy config.example.yaml to config.yaml and edit it",
         ) from None
-    settings = Settings.model_validate(raw)
+    except yaml.YAMLError as exc:
+        raise UserError(f"{path} is not valid YAML: {exc}") from None
+    try:
+        settings = Settings.model_validate(raw)
+    except ValidationError as exc:
+        raise UserError(f"{path}: {_problems(exc)}", hint="see config.example.yaml") from None
     base = path.resolve().parent
-    updates: dict[str, Path] = {"data_dir": base / settings.data_dir}
+    updates: dict[str, Any] = {"data_dir": base / settings.data_dir}
     if settings.skills_dir is not None:
         updates["skills_dir"] = base / settings.skills_dir
+    for name in ("memory", "workspace"):
+        section = getattr(settings, name)
+        if section.dir is not None:
+            updates[name] = section.model_copy(update={"dir": base / section.dir})
     return settings.model_copy(update=updates)
+
+
+def _problems(exc: ValidationError) -> str:
+    """Pydantic's errors as one line each: ``connections.shop.url_env: Field required``."""
+    lines = []
+    for err in exc.errors():
+        where = ".".join(str(p) for p in err["loc"]) or "(top level)"
+        lines.append(f"{where}: {err['msg']}")
+    return "; ".join(lines)

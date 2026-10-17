@@ -14,9 +14,12 @@
   （最多 1 万行），支持排序、筛选、复制和 CSV。点很多的图表也一样。
 - **用 SQL 出图。** 模型只写图表结构，数据由查询结果填入；`split_by` 能把
   `(month, category, revenue)` 这样的长表变成每个品类一条线。
-- **三重只读。** 只读账号（需要你来配，见下文）；每个连接都是只读会话并带语句超时；
-  SQL 检查拒绝写操作，并给最外层加 `LIMIT`。
+- **多重只读。** 只读账号（需要你来配，见下文）；每条查询都带语句超时；SQL 检查拒绝写操作，
+  并给最外层加 `LIMIT`。MySQL 的会话本身也是只读的。
 - **业务口径**写成普通的 `SKILL.md` 文件，agent 需要时会去读。
+- **记忆和工作区。** agent 跨对话记住偏好和确认过的口径（可在“记忆”页查看和修改），
+  并在一个文件目录里读写文件（页面的文件面板）。它也能自己画表格，或用 `show_html`
+  做交互页面，比如假设分析计算器。
 
 ## 快速开始（演示库）
 
@@ -28,6 +31,7 @@ createdb demo_shop && psql demo_shop -f examples/demo_postgres.sql
 cp config.example.yaml config.yaml
 cp .env.example .env                       # 填 LOVIA_MODEL（及 API key）和 DB_DEMO_URL
 
+.venv/bin/lovia-db-agent check             # 逐个连接数据库，报告看到了什么
 .venv/bin/lovia-db-agent                   # → http://127.0.0.1:8000
 ```
 
@@ -48,10 +52,23 @@ connections:
     timezone: Asia/Shanghai
 instructions: 用中文回答。
 skills_dir: skills
+memory: true                  # 跨对话的记忆，存于 <data_dir>/memory
+workspace:
+  mode: coding                # 文件在 <data_dir>/workspace；shell 命令需要你批准
 ```
 
-在本机以外提供服务时需要设置 `LOVIA_WEB_TOKEN`（或放在你自己的鉴权后面）；
-`--host` / `--port` / `--config` 是命令行参数。
+相对路径以配置文件所在目录为准。`.env` 从运行命令的目录读取。
+
+| 命令 | 作用 |
+| --- | --- |
+| `lovia-db-agent [serve]` | 启动聊天界面。参数 `--config`、`--host`、`--port`（或环境变量 `DB_AGENT_CONFIG` / `DB_AGENT_HOST` / `DB_AGENT_PORT`） |
+| `lovia-db-agent check` | 按 agent 的方式连接每个数据库，报告版本、能读到多少张表、会话能否写入；出错时给出错误和提示 |
+
+在本机以外提供服务需要登录令牌：设置 `LOVIA_WEB_TOKEN`，否则启动时自动生成并打印带
+`/?token=...` 的链接。也可以放在你自己的鉴权后面。
+
+记忆是所有用户共用的一份笔记，工作区是所有对话共用的一个目录。shell 命令只拿到最小的环境变量
+（没有数据库连接串和 API key），任何工具都不能打开 `.env` 文件。
 
 ## 数据库侧准备
 
@@ -62,6 +79,8 @@ skills_dir: skills
    视图，只把它授权给这个账号。这样表发现、查询、样例数据看到的都是同一份内容。
    在 SQL 层打码是可以绕过的（`SELECT phone AS p`），所以 agent 不假装做这件事。
 3. PostgreSQL：`ALTER ROLE agent_ro SET default_transaction_read_only = on;`
+   应用连接时不发送会话参数（PgBouncer 等连接池会拒绝；每条语句用 `SET LOCAL` 限时），
+   所以会话只读靠的就是这条角色设置。`lovia-db-agent check` 会在会话可写时提醒。
 
 ## 工作方式
 
@@ -73,7 +92,8 @@ skills_dir: skills
 | `query_table` | 用户 | 表格（`ui_result("table")`；结果大时模型只看预览） |
 | `query_chart` | 用户 | 由查询结果绘制的 ECharts 图（`split_by` 按类别拆成多条序列） |
 
-另外还有 lovia 自带的 `show_chart`（用于单个查询拿不到的数据）和 `now`。
+另外还有 lovia 自带的 `show_table` 和 `show_chart`（用于单个查询拿不到的数据）、
+`show_html`（沙箱中运行、不能联网的交互页面）、`now`，工作区的文件和 shell 工具，以及记忆的 `recall`。
 
 大结果不进模型上下文：lovia 的 `put_ui_data` 把完整数据随聊天保存（删除聊天时一并删除），
 模型只看预览和各列统计，页面用 lovia 内置的表格和图表画出全部数据，聊天里和导出的 HTML 中都是。
