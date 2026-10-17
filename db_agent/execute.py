@@ -26,7 +26,7 @@ from dataclasses import dataclass
 from typing import Any
 
 import sqlalchemy.exc as sa_exc
-from lovia import ToolError
+from lovia import ToolError, UserError
 from sqlalchemy import bindparam, event, text
 from sqlalchemy.engine import make_url
 from sqlalchemy.ext.asyncio import AsyncConnection, AsyncEngine, create_async_engine
@@ -67,7 +67,15 @@ class Database:
         self.name = name
         self.config = connection
         self.limits = limits
-        url = make_url(connection.url())
+        try:
+            url = make_url(connection.url())
+        except (sa_exc.ArgumentError, ValueError):
+            # Not the URL or the parser's message: either may hold the password.
+            raise UserError(
+                f"{connection.url_env} is not a valid database URL",
+                hint="use postgresql+asyncpg://user:password@host:port/db "
+                "or mysql+asyncmy://user:password@host:port/db",
+            ) from None
         self.dialect: Dialect = for_backend(url.get_backend_name(), name)
         self._url = url
         self._engine: AsyncEngine | None = None

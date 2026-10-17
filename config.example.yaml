@@ -22,7 +22,7 @@ skills_dir: skills
 # Where chats live (big results are kept with their chat).
 data_dir: .data
 
-# Notes the agent keeps across chats: preferences, confirmed definitions.
+# Notes the agent keeps across chats when asked: preferences, definitions.
 # Shared by everyone using this app; view and edit them on the Memory page.
 memory: true                    # or: {dir: notes}; default dir: <data_dir>/memory
 

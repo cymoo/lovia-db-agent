@@ -98,8 +98,9 @@ class _Switch(BaseModel):
 
 
 class MemorySettings(_Switch):
-    """Notes the agent keeps across chats: the user's preferences, confirmed
-    definitions. Shared by everyone using this app; the page can edit them."""
+    """Notes the agent keeps across chats when the user asks: preferences,
+    definitions. No archive of the chats. Shared by everyone using this app;
+    the page can edit them."""
 
     dir: Path | None = None
     """Default: ``<data_dir>/memory``."""

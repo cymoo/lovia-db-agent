@@ -60,9 +60,10 @@ async def _probe(db: Database) -> str:
         catalog = await load_catalog(db)
         read_only = (await db.fetch(db.dialect.read_only_sql))[0][0]
     except Exception as exc:  # noqa: BLE001 - connected, but the catalog failed
+        detail = (db.scrub(str(exc)).splitlines() or [""])[0][:300]  # a timeout's is empty
         raise ToolError(
-            f"connected, but reading the catalog failed: {type(exc).__name__}: "
-            + db.scrub(str(exc)).splitlines()[0][:300],
+            f"connected, but reading the catalog failed: {type(exc).__name__}"
+            + (f": {detail}" if detail else ""),
             hint="grant the account SELECT on the tables, and USAGE on their schemas",
         ) from None
     views = sum(t.kind == "view" for t in catalog.tables)

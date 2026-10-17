@@ -12,6 +12,7 @@ from db_agent import __main__ as cli
 from db_agent.app import build_agent
 from db_agent.check import check
 from db_agent.config import Settings, load_settings
+from db_agent.execute import Database
 from db_agent.plugin import SQLDatabase
 
 URL_ENV = "DB_AGENT_APP_URL"
@@ -36,6 +37,9 @@ def test_the_agent_has_memory_a_workspace_and_the_show_tools(tmp_path: Path) -> 
     assert {"show_table", "show_chart", "show_html", "now"} <= names
     (memory,) = [p for p in agent.plugins if isinstance(p, Memory)]
     assert Path(memory.root) == tmp_path / "memory"
+    # Notes only: chats — and the query results in them — are neither
+    # archived nor mined for facts.
+    assert memory.index is None and not memory.auto_curate
     assert isinstance(agent.workspace, LocalWorkspace)
     assert Path(agent.workspace.root) == tmp_path / "workspace"
     assert (tmp_path / "workspace").is_dir()
@@ -97,6 +101,44 @@ async def test_check_reports_each_problem(tmp_path: Path, monkeypatch: pytest.Mo
     assert "model      not set" in out
     assert "down       FAILED: down is unreachable or busy" in out
     assert "unset      FAILED: DB_AGENT_APP_MISSING is not set" in out
+
+
+@pytest.mark.parametrize(
+    "url", ["postgresql+asyncpg://u:s3cret@h:abc/db", "s3cret not a url"], ids=["port", "garbage"]
+)
+async def test_check_goes_on_past_a_malformed_url(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, url: str
+) -> None:
+    monkeypatch.setenv("DB_AGENT_APP_BAD", url)
+    settings = Settings.model_validate(
+        {
+            "connections": {"bad": {"url_env": "DB_AGENT_APP_BAD"}, "down": {"url_env": URL_ENV}},
+            "data_dir": tmp_path,
+        }
+    )
+    lines: list[str] = []
+    assert not await check(settings, lines.append)
+    out = "\n".join(lines)
+    assert "bad        FAILED: DB_AGENT_APP_BAD is not a valid database URL" in out
+    assert "s3cret" not in out and "down       FAILED" in out
+
+
+async def test_check_survives_an_error_without_a_message(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    async def fine(self: Database, sql: str, **_: object) -> None:
+        return None
+
+    async def slow(self: Database) -> str:
+        raise TimeoutError()  # what a client-side timeout raises: no message
+
+    monkeypatch.setattr(Database, "run", fine)
+    monkeypatch.setattr(Database, "load_version", slow)
+    lines: list[str] = []
+    assert not await check(_settings(tmp_path), lines.append)
+    assert lines[-1].startswith(
+        "shop       FAILED: connected, but reading the catalog failed: TimeoutError\n"
+    )
 
 
 def test_the_cli_serves_by_default_and_reads_env_defaults(

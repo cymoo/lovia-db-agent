@@ -31,9 +31,8 @@ DEFAULT_INSTRUCTIONS = (
 
 
 _MEMORY_NOTE = (
-    "Memory is for what the user wants kept across chats: preferences, confirmed "
-    "business definitions, corrections. Never store query results or personal data from "
-    "the databases."
+    "Remember only what the user asks you to keep, or confirms: preferences, business "
+    "definitions, corrections. Never query results or personal data from the databases."
 )
 
 
@@ -43,8 +42,13 @@ def build_agent(settings: Settings, db: SQLDatabase, *, model: Any = None) -> Ag
         plugins.append(Skills(settings.skills_dir))
     notes = [DEFAULT_INSTRUCTIONS, settings.instructions.strip(), SURFACE_NOTE]
     if settings.memory.enabled:
-        # A long-lived server: curating notes mustn't hold back each answer.
-        plugins.append(Memory(settings.memory_dir, curate_in_background=True))
+        # Notes only, written when the model calls remember: no archive of the
+        # chats and no automatic curation, either of which would keep answers —
+        # query results — where every user's agent reads them. The periodic
+        # tidy-up of the notes runs off the answer's path.
+        plugins.append(
+            Memory(settings.memory_dir, index=None, auto_curate=False, curate_in_background=True)
+        )
         notes.append(_MEMORY_NOTE)
     agent: Agent[Any] = Agent(
         name="data-analyst",
@@ -82,7 +86,7 @@ def build_app(settings: Settings, *, model: Any = None, token: str | None = None
             yield
         finally:
             if memory is not None:
-                # The last answers' notes, unless curation hangs.
+                # A tidy-up of the notes in flight, unless it hangs.
                 with contextlib.suppress(asyncio.TimeoutError):
                     await asyncio.wait_for(memory.drain(), MEMORY_DRAIN_S)
             await db.aclose()

@@ -21,8 +21,8 @@ copies a number. Built on [lovia](https://github.com/cymoo/lovia) and its web UI
   statement timeout on every query, and a SQL check that refuses writes and
   caps the outermost `LIMIT`. MySQL sessions are read-only too.
 - **Business definitions** as plain `SKILL.md` files the agent reads when needed.
-- **Memory and a workspace.** The agent keeps notes across chats (preferences,
-  confirmed definitions; editable on the Memory page) and works in a directory
+- **Memory and a workspace.** The agent keeps notes across chats when you ask
+  or confirm (preferences, definitions; editable on the Memory page) and works in a directory
   of files, shown in the Files panel. It can also show its own tables, and
   interactive pages (`show_html`) such as a what-if calculator.
 
@@ -76,7 +76,8 @@ generated and its `/?token=...` link printed at startup. Or put the app
 behind your own auth.
 
 Memory is one set of notes for everyone using the app, and the workspace one
-directory for every chat. Shell commands run with a minimal environment (no
+directory for every chat. It holds only what the agent is told to remember:
+chats aren't archived or mined for facts, so query results don't end up there. Shell commands run with a minimal environment (no
 database URLs or API keys), and no tool may open a `.env` file.
 
 ## Prepare the database
@@ -106,7 +107,7 @@ This is the security boundary, so do it properly:
 
 Plus lovia's `show_table` and `show_chart` (for data no single query returns),
 `show_html` (an interactive page, sandboxed with no network), `now`, the
-workspace's file and shell tools, and memory's `recall`.
+workspace's file and shell tools, and memory's `remember` / `forget`.
 
 A big result stays out of the model's context: lovia's `put_ui_data` keeps
 the full rows with the chat (deleted with it), the model reads a preview with
