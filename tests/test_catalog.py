@@ -247,6 +247,30 @@ def test_shards_need_the_same_columns_and_a_few_members() -> None:
     assert pair.overview(10_000).splitlines() == ["s.v1(a int)", "s.v2(a int)"]
 
 
+def test_shards_that_differ_in_what_a_definition_shows_stay_apart() -> None:
+    def shard(name: str, comment: str = "金额（元）", ref: str = "id") -> Table:
+        t = Table("s", name, "table", "", 10, [Column("c_id", "integer", False, comment)])
+        t.foreign_keys = [ForeignKey(("c_id",), "s", "customers", (ref,))]
+        return t
+
+    alike = Catalog([shard("log_1"), shard("log_2"), shard("log_3")])
+    assert len(alike.overview(10_000).splitlines()) == 1
+    # Another join target, or another unit: shown as a family, the first's
+    # definition would be wrong for them.
+    cat = Catalog(
+        [shard("log_1"), shard("log_2"), shard("log_3"), shard("log_4", ref="legacy_id")]
+        + [shard("pay_1"), shard("pay_2"), shard("pay_3", "金额（分）")]
+    )
+    lines = cat.overview(10_000).splitlines()
+    assert sum("more alike" in line for line in lines) == 1
+    assert any(line.startswith("s.log_4(") for line in lines)
+    assert [line[:7] for line in lines if line.startswith("s.pay_")] == [
+        "s.pay_1",
+        "s.pay_2",
+        "s.pay_3",
+    ]
+
+
 def test_long_definitions_are_cut_short() -> None:
     wide = Table("s", "wide", "table", "", 1, [Column(f"c{i}", "int", True) for i in range(45)])
     labels = [f"v{i}" for i in range(12)]

@@ -270,14 +270,21 @@ class Catalog:
             if m is None:
                 families[("table", t.schema, t.name)] = [t]
                 continue
-            # Alike in everything but the digits: columns, keys, the comment
-            # ("2025年1月订单" and "2025年2月订单" are alike).
+            # Alike in everything the overview could show of any member, but the
+            # digits ("2025年1月订单" and "2025年2月订单" are alike): only the
+            # first is shown, so whatever tells them apart — a column's unit,
+            # an enum label, a key's target column — must keep them apart.
             shape = (
                 t.kind,
-                re.sub(r"\d+", "#", t.comment),
-                tuple((c.name, c.type) for c in t.columns),
+                _digitless(t.comment),
+                tuple(
+                    (c.name, c.type, c.nullable, _digitless(c.comment), tuple(c.enum))
+                    for c in t.columns
+                ),
                 tuple(t.primary_key),
-                tuple(sorted((fk.columns, fk.ref_qualified) for fk in t.foreign_keys)),
+                tuple(
+                    sorted((fk.columns, fk.ref_qualified, fk.ref_columns) for fk in t.foreign_keys)
+                ),
             )
             families.setdefault(("family", t.schema, m.group(1), shape), []).append(t)
         entries: list[_Entry] = []
@@ -358,6 +365,10 @@ def _line_bytes(s: str) -> int:
 
 def _item_bytes(s: str) -> int:
     return len(s.encode()) + 2  # with the ", " separator
+
+
+def _digitless(text: str) -> str:
+    return re.sub(r"\d+", "#", text)
 
 
 def _natural(t: Table) -> list[Any]:
