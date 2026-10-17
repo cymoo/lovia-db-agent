@@ -12,6 +12,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import re
 import time
 from pathlib import Path
 from typing import Any
@@ -27,6 +28,7 @@ from sqlalchemy.engine import make_url
 
 from db_agent import execute, plugin
 from db_agent.app import build_agent, build_app
+from db_agent.catalog import load_catalog
 from db_agent.config import Connection, Limits, Settings
 from db_agent.execute import Database
 from db_agent.plugin import SQLDatabase
@@ -73,12 +75,40 @@ async def _stored(store: ChatStore, env: dict[str, Any]) -> dict[str, Any]:
     return json.loads(await store.get_ui_data(SID, env["data"]) or b"")
 
 
-async def test_the_system_prompt_lists_the_tables(tmp_path: Path) -> None:
+async def test_the_system_prompt_defines_the_tables(tmp_path: Path) -> None:
     _, provider, _ = await _run(_settings(tmp_path))
     system = provider.calls[0][0].content
-    assert "- shop (PostgreSQL 18" in system or "- shop (PostgreSQL" in system
+    assert "- shop (PostgreSQL" in system
     assert "time zone Asia/Shanghai" in system and "演示网店" in system
-    assert "shop.orders (订单)" in system and "shop.refunds (退款)" in system
+    # A small schema comes whole: keys, enum labels, comments — no data values.
+    assert (
+        "  shop.orders(id pk, customer_id→customers, status text — 订单状态：paid / shipped / "
+        "cancelled, created_at timestamptz — 下单时间) — 订单\n"
+    ) in system
+    assert "tier enum(bronze|silver|gold) — 会员等级" in system
+    assert "shop.order_items(order_id pk→orders, product_id pk→products," in system
+    # The partitions roll up into their parent.
+    assert "shop.visits(customer_id→customers" in system and "visits_2025" not in system
+    assert "search_schema" not in system.split("How to work")[0]
+
+
+async def test_the_catalog_reads_keys_and_partitions_in_bulk() -> None:
+    db = Database("shop", Connection(url_env=URL_ENV), Limits())
+    try:
+        cat = await load_catalog(db)
+    finally:
+        await db.aclose()
+    items = cat.find("order_items")[0]
+    assert items.primary_key == ["order_id", "product_id"]
+    assert {(fk.columns, fk.ref_qualified, fk.ref_columns) for fk in items.foreign_keys} == {
+        (("order_id",), "shop.orders", ("id",)),
+        (("product_id",), "shop.products", ("id",)),
+    }
+    visits = cat.find("visits")[0]
+    assert visits.primary_key == [] and visits.est_rows == 20_000  # the partitions' sum
+    assert not cat.find("visits_2025")
+    tier = next(c for c in cat.find("customers")[0].columns if c.name == "tier")
+    assert tier.enum == ["bronze", "silver", "gold"]
 
 
 async def test_search_and_describe(tmp_path: Path) -> None:
@@ -91,7 +121,22 @@ async def test_search_and_describe(tmp_path: Path) -> None:
     assert "amount numeric(10,2) — 退款金额（元）" in search.output
     assert "## shop.orders" in describe.output and "primary key: (id)" in describe.output
     assert "foreign key: (customer_id) → shop.customers(id)" in describe.output
+    assert "referenced by: shop.refunds(order_id)" in describe.output
+    assert "index: orders_created_at (created_at)" in describe.output
+    # From pg_stats: low-cardinality text, with each value's share of rows.
+    assert re.search(r"^- status: shipped \d+%, (paid|cancelled) \d+%, ", describe.output, re.M)
+    assert "- created_at:" not in describe.output
     assert "sample rows:" in describe.output and "Not found: nope" in describe.output
+
+
+async def test_describe_reads_an_enum_and_a_partitioned_table(tmp_path: Path) -> None:
+    (out,), _, _ = await _run(
+        _settings(tmp_path), call("describe_tables", {"tables": ["customers", "visits"]})
+    )
+    assert "- tier shop.customer_tier not null (enum: bronze | silver | gold)" in out.output
+    assert re.search(r"^- tier: bronze \d+%, silver \d+%, gold \d+%$", out.output, re.M)
+    # The partitioned parent's statistics cover its partitions.
+    assert re.search(r"^- page: home \d+%, product \d+%", out.output, re.M)
 
 
 async def test_query_is_for_the_model(tmp_path: Path) -> None:
@@ -102,9 +147,8 @@ async def test_query_is_for_the_model(tmp_path: Path) -> None:
         ),
     )
     lines = out.output.splitlines()
-    assert (
-        lines[0] == "status\tn" and lines[1].startswith("cancelled\t") and lines[-1] == "(3 rows)"
-    )
+    assert lines[0] == "status\tn" and lines[1].startswith("cancelled\t")
+    assert re.fullmatch(r"\(3 rows, \d+ ms\)", lines[-1])
 
 
 async def test_show_reads_a_setting(tmp_path: Path) -> None:
@@ -393,9 +437,10 @@ async def test_describe_skips_samples_out_of_time(
     (out,), _, _ = await _run(
         _settings(tmp_path), call("describe_tables", {"tables": ["orders", "refunds"]})
     )
-    # The columns still come back; keys and samples wait for a call of their own.
-    assert out.output.count("keys and sample rows: skipped") == 2
-    assert "- status text not null" in out.output and "primary key" not in out.output
+    # Columns and keys still come back; the rest waits for a call of its own.
+    assert out.output.count("indexes, common values and sample rows: skipped") == 2
+    assert "- status text not null" in out.output and "primary key: (id)" in out.output
+    assert "sample rows:\n" not in out.output
 
 
 def test_the_app_serves_the_page_and_guards_the_results(tmp_path: Path) -> None:

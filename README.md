@@ -9,9 +9,13 @@ copies a number. Built on [lovia](https://github.com/cymoo/lovia) and its web UI
 
 ## What you get
 
-- **Any schema size.** The system prompt lists as many tables as a token budget
-  allows; `search_schema` finds the rest by name, column or comment (comments in
-  any language). Ten tables or ten thousand, the same workflow.
+- **Any schema size.** The system prompt carries the schema itself, within a
+  token budget. A small database arrives whole — columns, keys, enum labels,
+  comments — so the agent writes SQL straight away. In a bigger one the tables
+  that others point at come with their columns, more get just a name, and
+  `search_schema` finds the rest by name, column or comment (comments in any
+  language). Shards like `log_202401`, `log_202402`, … count once. One
+  algorithm from ten tables to ten thousand, with no cliff in between.
 - **Any result size.** A big result shows the model 20 rows plus per-column stats,
   while the user's table pages through all of them (up to 10,000), with sort,
   filter, copy and CSV. Charts with lots of points do the same.
@@ -22,8 +26,8 @@ copies a number. Built on [lovia](https://github.com/cymoo/lovia) and its web UI
   caps the outermost `LIMIT`. MySQL sessions are read-only too.
 - **Business definitions** as plain `SKILL.md` files the agent reads when needed.
 - **Memory and a workspace.** The agent keeps notes across chats when you ask
-  or confirm (preferences, definitions; editable on the Memory page) and works in a directory
-  of files, shown in the Files panel. It can also show its own tables, and
+  or confirm (preferences, definitions; editable on the Memory page) and works
+  in a directory of files, shown in the Files panel. It can also show its own tables, and
   interactive pages (`show_html`) such as a what-if calculator.
 
 ## Quick start (demo database)
@@ -76,9 +80,10 @@ generated and its `/?token=...` link printed at startup. Or put the app
 behind your own auth.
 
 Memory is one set of notes for everyone using the app, and the workspace one
-directory for every chat. It holds only what the agent is told to remember:
-chats aren't archived or mined for facts, so query results don't end up there. Shell commands run with a minimal environment (no
-database URLs or API keys), and no tool may open a `.env` file.
+directory for every chat. Memory holds only what the agent is told to
+remember: chats aren't archived or mined for facts, so query results don't end
+up there. Shell commands run with a minimal environment (no database URLs or
+API keys), and no tool may open a `.env` file.
 
 ## Prepare the database
 
@@ -100,14 +105,23 @@ This is the security boundary, so do it properly:
 | Tool | For | Returns |
 | --- | --- | --- |
 | `search_schema` | the model | matching tables and columns |
-| `describe_tables` | the model | columns, keys, indexes, 3 sample rows |
-| `query` | the model | up to 50 rows, as text |
+| `describe_tables` | the model | columns, keys, indexes, common values, 3 sample rows |
+| `query` | the model | up to 50 rows, as text, and how long it took |
 | `query_table` | the user | a table (`ui_result("table")`; when big, the model gets a preview) |
 | `query_chart` | the user | an ECharts chart from the rows (`split_by` for one series per category) |
 
 Plus lovia's `show_table` and `show_chart` (for data no single query returns),
 `show_html` (an interactive page, sandboxed with no network), `now`, the
 workspace's file and shell tools, and memory's `remember` / `forget`.
+
+The schema comes from a few bulk catalog queries — tables, columns, keys —
+however many tables there are, refreshed every 10 minutes in the background.
+The system prompt holds only metadata, never a data value, and changes only
+when the schema does (row counts drift, the text doesn't), so the model
+provider's prompt cache stays warm. `limits.catalog_budget_tokens` (default
+6000) sets its size. Common values in `describe_tables` come from PostgreSQL's
+planner statistics (`pg_stats`), so describing a table never scans it; MySQL
+lists enum labels in the column type, and the sample rows do the rest.
 
 A big result stays out of the model's context: lovia's `put_ui_data` keeps
 the full rows with the chat (deleted with it), the model reads a preview with
@@ -117,7 +131,8 @@ chart, in the chat and in its HTML export.
 Every wait has a limit — connecting, a pool slot, each statement — so a slow
 or down database reaches the model as an error with a hint, not a hang.
 `describe_tables` samples each table with a `LIMIT` and a 3-second cap, and
-gives up keys and samples rather than the whole call when time runs short.
+gives up indexes, common values and samples rather than the whole call when
+time runs short.
 Values Python can't hold, like PostgreSQL's `infinity`, BC dates or year 10000,
 arrive as text.
 

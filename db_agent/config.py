@@ -80,8 +80,8 @@ class Limits(BaseModel):
     chart_inline_bytes: int = Field(4096, ge=0)
     """Chart data up to this size travels in the tool output (the model sees
     it); bigger data is kept with the chat and the model gets a summary."""
-    catalog_budget_tokens: int = Field(2000, ge=0)
-    """How much of the system prompt the table list may take, all databases together."""
+    catalog_budget_tokens: int = Field(6000, ge=0)
+    """How much of the system prompt the schema overview may take, all databases together."""
 
 
 class _Switch(BaseModel):

@@ -17,6 +17,7 @@ from lovia.testing import ScriptedProvider, call, text
 from lovia.transcript import ToolResultEntry
 
 from db_agent.app import build_agent
+from db_agent.catalog import load_catalog
 from db_agent.config import Connection, Limits, Settings
 from db_agent.execute import Database
 from db_agent.plugin import SQLDatabase
@@ -50,9 +51,32 @@ async def test_catalog_search_and_describe(tmp_path: Path) -> None:
         call("describe_tables", {"tables": ["orders"]}),
     )
     system = provider.calls[0][0].content
-    assert "- shop (MySQL 8" in system and "demo_shop.orders (订单)" in system
+    assert "- shop (MySQL 8" in system
+    assert "  demo_shop.orders(id pk, customer_id→customers, status varchar(10)" in system
+    assert "tier enum(bronze|silver|gold) — 会员等级" in system
+    assert "demo_shop.order_items(order_id pk→orders, product_id pk→products," in system
     assert search.output.startswith("demo_shop.refunds (table")
     assert "primary key: (id)" in describe.output and "sample rows:" in describe.output
+    assert "foreign key: (customer_id) → demo_shop.customers(id)" in describe.output
+    assert "referenced by: demo_shop.refunds(order_id)" in describe.output
+    assert "common values" not in describe.output  # PostgreSQL's statistics only
+
+
+async def test_the_catalog_reads_keys_and_enums_in_bulk() -> None:
+    db = Database("shop", Connection(url_env=URL_ENV), Limits())
+    try:
+        cat = await load_catalog(db)
+    finally:
+        await db.aclose()
+    items = cat.find("order_items")[0]
+    assert items.primary_key == ["order_id", "product_id"]
+    assert {(fk.columns, fk.ref_qualified, fk.ref_columns) for fk in items.foreign_keys} == {
+        (("order_id",), "demo_shop.orders", ("id",)),
+        (("product_id",), "demo_shop.products", ("id",)),
+    }
+    tier = next(c for c in cat.find("customers")[0].columns if c.name == "tier")
+    assert tier.type == "enum('bronze','silver','gold')"
+    assert tier.enum == ["bronze", "silver", "gold"]
 
 
 async def test_a_table_and_a_split_chart(tmp_path: Path) -> None:
