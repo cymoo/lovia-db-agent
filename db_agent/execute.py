@@ -36,7 +36,7 @@ from .config import Connection, Limits
 from .convert import to_json
 from .dialects import Dialect, for_backend
 
-__all__ = ["CLEANUP_S", "Database", "QueryResult", "client_wait"]
+__all__ = ["CLEANUP_S", "Database", "QueryResult", "client_wait", "error_code"]
 
 logger = logging.getLogger(__name__)
 
@@ -225,7 +225,7 @@ class Database:
     def _tool_error(self, exc: Exception) -> ToolError:
         if isinstance(exc, sa_exc.DBAPIError) and not _unreachable(exc, self.dialect):
             message = self.scrub(_message(exc))
-            return ToolError(f"{self.name}: {message}", hint=self.dialect.hint(_code(exc)))
+            return ToolError(f"{self.name}: {message}", hint=self.dialect.hint(error_code(exc)))
         if isinstance(exc, (sa_exc.DBAPIError, sa_exc.TimeoutError, OSError, asyncio.TimeoutError)):
             # A lost connection, no pool slot, a refused or slow connect, no answer.
             message = f"{self.name} is unreachable or busy: {type(exc).__name__}"
@@ -240,11 +240,23 @@ class Database:
         )
 
     def scrub(self, message: str) -> str:
-        """``message`` without the URL's password, user name and host."""
+        """``message`` without the URL's password, user name and host.
+
+        Whole words only: a user named ``postgres`` leaves ``postgresql`` alone."""
         for secret in (self._url.password, self._url.username, self._url.host):
             if secret and len(str(secret)) > 2:
-                message = message.replace(str(secret), "***")
+                # ASCII neighbors only: a localized message may put CJK text
+                # right against a name, and that must still be scrubbed.
+                word = rf"(?<![A-Za-z0-9_.-]){re.escape(str(secret))}(?![A-Za-z0-9_.-])"
+                message = re.sub(word, "***", message)
         return message
+
+    def error_text(self, exc: BaseException) -> str:
+        """One scrubbed line saying what went wrong, for a person to read."""
+        if isinstance(exc, sa_exc.DBAPIError):
+            return self.scrub(_message(exc))
+        line = (str(exc).splitlines() or [""])[0][:300]  # a timeout's message is empty
+        return type(exc).__name__ + (f": {self.scrub(line)}" if line else "")
 
 
 _RETRY = "retry once shortly; if it keeps failing, tell the user"
@@ -270,10 +282,10 @@ def client_wait(statement_s: float, statements: int = 1) -> float:
 
 def _unreachable(exc: sa_exc.DBAPIError, dialect: Dialect) -> bool:
     """A failure of the connection, not of the statement: no SQL fixes it."""
-    return exc.connection_invalidated or _code(exc) in dialect.connection_codes
+    return exc.connection_invalidated or error_code(exc) in dialect.connection_codes
 
 
-def _code(exc: sa_exc.DBAPIError) -> str:
+def error_code(exc: sa_exc.DBAPIError) -> str:
     """The error's SQLSTATE (PostgreSQL) or error number (MySQL), as text.
 
     Hints key on codes, not messages: servers localize their messages.

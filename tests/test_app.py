@@ -5,10 +5,12 @@ from __future__ import annotations
 from pathlib import Path
 
 import pytest
+import sqlalchemy.exc as sa_exc
 from lovia import Memory, UserError
 from lovia.workspace import LocalWorkspace
 
 from db_agent import __main__ as cli
+from db_agent import check as check_module
 from db_agent.app import build_agent
 from db_agent.check import check
 from db_agent.config import Settings, load_settings
@@ -137,8 +139,38 @@ async def test_check_survives_an_error_without_a_message(
     lines: list[str] = []
     assert not await check(_settings(tmp_path), lines.append)
     assert lines[-1].startswith(
-        "shop       FAILED: connected, but reading the catalog failed: TimeoutError\n"
+        "shop       FAILED: connected to PostgreSQL, but reading the catalog failed: TimeoutError\n"
     )
+
+
+async def test_check_says_when_the_server_lacks_a_catalog_feature(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    class Missing(Exception):
+        sqlstate = "42883"
+
+    async def fine(self: Database, sql: str, **_: object) -> None:
+        return None
+
+    async def version(self: Database) -> str:
+        self.version = "11.16"
+        return self.version
+
+    async def catalog(db: Database) -> None:
+        raise sa_exc.ProgrammingError(
+            "SELECT …", {}, Missing("function pg_partition_tree(oid) does not exist")
+        )
+
+    monkeypatch.setattr(Database, "run", fine)
+    monkeypatch.setattr(Database, "load_version", version)
+    monkeypatch.setattr(check_module, "load_catalog", catalog)
+    lines: list[str] = []
+    assert not await check(_settings(tmp_path), lines.append)
+    assert lines[-1].startswith(
+        "shop       FAILED: connected to PostgreSQL 11.16, but reading the catalog failed: "
+        "function pg_partition_tree(oid) does not exist\n"
+    )
+    assert "an older version or a compatible fork" in lines[-1]
 
 
 def test_the_cli_serves_by_default_and_reads_env_defaults(

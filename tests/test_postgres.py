@@ -105,8 +105,9 @@ async def test_the_catalog_reads_keys_and_partitions_in_bulk() -> None:
         (("product_id",), "shop.products", ("id",)),
     }
     visits = cat.find("visits")[0]
-    assert visits.primary_key == [] and visits.est_rows == 20_000  # the partitions' sum
-    assert not cat.find("visits_2025")
+    # The sum of the leaves, two levels down for 2026 (partitioned by half-year).
+    assert visits.primary_key == [] and visits.est_rows == 20_000
+    assert not cat.find("visits_2025") and not cat.find("visits_2026_h1")
     tier = next(c for c in cat.find("customers")[0].columns if c.name == "tier")
     assert tier.enum == ["bronze", "silver", "gold"]
 

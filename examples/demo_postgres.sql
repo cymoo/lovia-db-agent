@@ -68,7 +68,8 @@ CREATE TABLE shop.refunds (
 COMMENT ON TABLE shop.refunds IS '退款';
 COMMENT ON COLUMN shop.refunds.amount IS '退款金额（元）';
 
--- Partitioned by year: the partitions roll up into one table for the agent.
+-- Partitioned by year, 2026 again by half-year: every partition rolls up into
+-- one table for the agent.
 CREATE TABLE shop.visits (
     customer_id  integer REFERENCES shop.customers (id),
     page         text NOT NULL,
@@ -77,7 +78,11 @@ CREATE TABLE shop.visits (
 CREATE TABLE shop.visits_2025 PARTITION OF shop.visits
     FOR VALUES FROM ('2025-01-01') TO ('2026-01-01');
 CREATE TABLE shop.visits_2026 PARTITION OF shop.visits
-    FOR VALUES FROM ('2026-01-01') TO ('2027-01-01');
+    FOR VALUES FROM ('2026-01-01') TO ('2027-01-01') PARTITION BY RANGE (visited_at);
+CREATE TABLE shop.visits_2026_h1 PARTITION OF shop.visits_2026
+    FOR VALUES FROM ('2026-01-01') TO ('2026-07-01');
+CREATE TABLE shop.visits_2026_h2 PARTITION OF shop.visits_2026
+    FOR VALUES FROM ('2026-07-01') TO ('2027-01-01');
 COMMENT ON TABLE shop.visits IS '访问记录';
 COMMENT ON COLUMN shop.visits.customer_id IS '会员；空为未登录访客';
 COMMENT ON COLUMN shop.visits.page IS '页面：home / product / cart / checkout';

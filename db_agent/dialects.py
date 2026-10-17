@@ -65,6 +65,10 @@ class Dialect:
     """Hints by error code: SQLSTATE (PostgreSQL) or error number (MySQL)."""
     connection_codes: frozenset[str]
     """Error codes about the connection itself, not the statement: no SQL fixes them."""
+    denied_codes: frozenset[str]
+    """Error codes for a missing grant."""
+    missing_codes: frozenset[str]
+    """Error codes for a function, table or column the server doesn't have."""
     on_connect: Callable[[Any], Awaitable[None]] | None = None
     """Run on every new driver connection, before its first statement."""
     common_values_sql: str | None = None
@@ -139,15 +143,21 @@ def _pg_time_zone(tz: str) -> str:
 _OFFSET = re.compile(r"([+-])(\d{1,2}):?(\d{2})")
 
 # Readable tables, views and materialized views; partitions roll up into
-# their parent, whose row estimate is the sum of its leaves' (PostgreSQL 12+).
+# their parent, whose row estimate is the sum of its leaves'. The leaves come
+# from pg_inherits, level by level: pg_partition_tree() would need PostgreSQL 12,
+# and this works from 10, where partitioning began.
 _PG_TABLES = """
 SELECT n.nspname, c.relname,
        CASE WHEN c.relkind IN ('v', 'm') THEN 'view' ELSE 'table' END,
        obj_description(c.oid, 'pg_class'),
        CASE WHEN c.relkind = 'p' THEN (
+                WITH RECURSIVE tree(relid) AS (
+                    SELECT inhrelid FROM pg_inherits WHERE inhparent = c.oid
+                    UNION ALL
+                    SELECT i.inhrelid FROM pg_inherits i JOIN tree ON i.inhparent = tree.relid)
                 SELECT sum(l.reltuples) FILTER (WHERE l.reltuples >= 0)::bigint
-                FROM pg_partition_tree(c.oid) p JOIN pg_class l ON l.oid = p.relid
-                WHERE p.isleaf)
+                FROM tree JOIN pg_class l ON l.oid = tree.relid
+                WHERE l.relkind <> 'p')
             WHEN c.reltuples < 0 THEN NULL
             ELSE c.reltuples::bigint END
 FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
@@ -225,6 +235,8 @@ POSTGRES = Dialect(
         "22012": "guard the divisor, e.g. NULLIF(x, 0)",
         "42803": _GROUP_BY,
     },
+    denied_codes=frozenset({"42501"}),
+    missing_codes=frozenset({"42883", "42703", "42P01"}),
     connection_codes=frozenset(
         {
             *("08000", "08001", "08003", "08004", "08006", "08007", "08P01"),  # class 08
@@ -309,6 +321,8 @@ MYSQL = Dialect(
         "1064": _SYNTAX,
         "1055": _GROUP_BY,
     },
+    denied_codes=frozenset({"1044", "1142", "1143"}),  # database, table, column
+    missing_codes=frozenset({"1305", "1054", "1146"}),
     connection_codes=frozenset(
         {
             "1040",  # too many connections
