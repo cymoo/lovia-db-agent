@@ -17,12 +17,12 @@ uv pip install -e ".[dev]" --upgrade-package lovia
 旧参数会在启动时报 `TypeError: ChatUI.__init__() got an unexpected keyword argument 'templates'`，`build_app()` 和 `lovia-db-agent` 命令都会这样。
 
 ```python
-# db_agent/app.py
-ui=ChatUI(
+# db_agent/app.py, build_app()
+ui = ChatUI(
     empty_title="Ask your data",
     empty_description="Questions in plain language; answers as tables and charts.",
     assets=_HERE / "templates",
-),
+)
 ```
 
 `db_agent/templates/index.html` 本身不用改：它仍然继承 `lovia/index.html`，并在 `head` block 里设置图片来源的 CSP。
@@ -34,6 +34,7 @@ lovia 现在会把这次运行的 `RunContext` 传给每个插件的 `setup`。�
 ```python
 # db_agent/plugin.py
 from lovia import PluginInstance, RunContext, ToolError, tool
+
 
 async def setup(self, ctx: RunContext[Any]) -> PluginInstance:
     return PluginInstance(tools=list(self._tools), instructions=await self._prompt())

@@ -23,12 +23,12 @@ The old argument fails at startup with
 `build_app()` and the `lovia-db-agent` command.
 
 ```python
-# db_agent/app.py
-ui=ChatUI(
+# db_agent/app.py, build_app()
+ui = ChatUI(
     empty_title="Ask your data",
     empty_description="Questions in plain language; answers as tables and charts.",
     assets=_HERE / "templates",
-),
+)
 ```
 
 `db_agent/templates/index.html` itself is unchanged: it still extends `lovia/index.html` and
@@ -43,6 +43,7 @@ every agent run fails with
 ```python
 # db_agent/plugin.py
 from lovia import PluginInstance, RunContext, ToolError, tool
+
 
 async def setup(self, ctx: RunContext[Any]) -> PluginInstance:
     return PluginInstance(tools=list(self._tools), instructions=await self._prompt())
