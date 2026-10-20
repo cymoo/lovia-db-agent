@@ -5,7 +5,7 @@ from __future__ import annotations
 from pathlib import Path
 
 import pytest
-from lovia import Runner
+from lovia import RunContext, Runner
 from lovia.testing import ScriptedProvider, call, text
 from lovia.transcript import ToolResultEntry
 
@@ -62,15 +62,16 @@ async def test_the_prompt_is_rebuilt_only_when_the_schema_changes(
         return current
 
     monkeypatch.setattr(db, "catalog", catalog)
-    first = (await db.setup()).instructions
+    ctx = RunContext(context=None, entries=[], agent=None)  # type: ignore[arg-type]
+    first = (await db.setup(ctx)).instructions
     assert "  s.orders(id pk) — 订单" in first
     # A reload with new row estimates: the very same text, for the prompt cache.
     tables[0].est_rows = 10_000
     current = Catalog(tables)
-    assert (await db.setup()).instructions is first
+    assert (await db.setup(ctx)).instructions is first
     # A new table reaches the prompt.
     current = Catalog([*tables, Table("s", "refunds", "table", "退款", 1)])
-    assert "s.refunds() — 退款" in (await db.setup()).instructions
+    assert "s.refunds() — 退款" in (await db.setup(ctx)).instructions
     await db.aclose()
 
 
