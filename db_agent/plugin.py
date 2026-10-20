@@ -22,7 +22,7 @@ import logging
 import time
 from typing import Annotated, Any
 
-from lovia import PluginInstance, ToolError, tool
+from lovia import PluginInstance, RunContext, ToolError, tool
 from lovia.tools.base import Tool
 from lovia.web import put_ui_data, ui_result, validate_chart_option
 
@@ -105,7 +105,7 @@ class SQLDatabase:
         self._instructions: tuple[tuple[Any, ...], str] | None = None
         self._tools = self._build_tools()
 
-    async def setup(self) -> PluginInstance:
+    async def setup(self, ctx: RunContext[Any]) -> PluginInstance:
         return PluginInstance(tools=list(self._tools), instructions=await self._prompt())
 
     async def _prompt(self) -> str:

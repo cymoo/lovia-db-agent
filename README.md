@@ -153,6 +153,9 @@ ruff check . && ruff format --check . && mypy
 CI runs the integration tests against PostgreSQL 16, PostgreSQL 11 (the oldest
 supported) and MySQL 8.4 containers.
 
+Upgrading from lovia 0.9.87 or earlier: see
+[docs/upgrade-lovia-0.9.96.md](docs/upgrade-lovia-0.9.96.md).
+
 ## License
 
 MIT

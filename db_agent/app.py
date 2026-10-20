@@ -98,7 +98,7 @@ def build_app(settings: Settings, *, model: Any = None, token: str | None = None
         ui=ChatUI(
             empty_title="Ask your data",
             empty_description="Questions in plain language; answers as tables and charts.",
-            templates=_HERE / "templates",
+            assets=_HERE / "templates",
         ),
         token=token,
         lifespan=lifespan,
