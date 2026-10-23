@@ -6,7 +6,7 @@ readme = "README.md"
 requires-python = ">=3.10"
 license = "MIT"
 dependencies = [
-    "lovia[web]>=0.9.96",
+    "lovia[web]>=0.9.112",
     "sqlalchemy[asyncio]>=2.0.30",
     "asyncpg>=0.29",
     "asyncmy>=0.2.9",

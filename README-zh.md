@@ -127,7 +127,8 @@ ruff check . && ruff format --check . && mypy
 
 CI 会在 PostgreSQL 16、PostgreSQL 11（支持的最低版本）和 MySQL 8.4 容器上跑集成测试。
 
-从 lovia 0.9.87 及更早版本升级，见 [docs/upgrade-lovia-0.9.96-zh.md](docs/upgrade-lovia-0.9.96-zh.md)。
+从旧版 lovia 升级：0.9.96 见 [docs/upgrade-lovia-0.9.112-zh.md](docs/upgrade-lovia-0.9.112-zh.md)；
+0.9.87 及更早版本先看 [docs/upgrade-lovia-0.9.96-zh.md](docs/upgrade-lovia-0.9.96-zh.md)。
 
 ## 许可证
 

@@ -62,7 +62,7 @@ async def test_the_prompt_is_rebuilt_only_when_the_schema_changes(
         return current
 
     monkeypatch.setattr(db, "catalog", catalog)
-    ctx = RunContext(context=None, entries=[], agent=None)  # type: ignore[arg-type]
+    ctx = RunContext(deps=None, entries=[], agent=None)  # type: ignore[arg-type]
     first = (await db.setup(ctx)).instructions
     assert "  s.orders(id pk) — 订单" in first
     # A reload with new row estimates: the very same text, for the prompt cache.
