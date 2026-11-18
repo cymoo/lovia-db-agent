@@ -19,7 +19,7 @@
 - **多重只读。** 只读账号（需要你来配，见下文）；每条查询都带语句超时；SQL 检查拒绝写操作，
   并给最外层加 `LIMIT`。MySQL 的会话本身也是只读的。
 - **业务口径**写成普通的 `SKILL.md` 文件，agent 需要时会去读。
-- **记忆和工作区。** 你要求或确认后，agent 跨对话记住偏好和口径（可在“记忆”页查看和修改），
+- **记忆和工作区。** 你要求或确认后，agent 跨对话记住偏好和口径（可在“设置 → 记忆”里查看和修改），
   并在一个文件目录里读写文件（页面的文件面板）。它也能自己画表格，或用 `show_html`
   做交互页面，比如假设分析计算器。
 
@@ -127,7 +127,8 @@ ruff check . && ruff format --check . && mypy
 
 CI 会在 PostgreSQL 16、PostgreSQL 11（支持的最低版本）和 MySQL 8.4 容器上跑集成测试。
 
-从旧版 lovia 升级：0.9.96 见 [docs/upgrade-lovia-0.9.112-zh.md](docs/upgrade-lovia-0.9.112-zh.md)；
+从旧版 lovia 升级：0.9.112 见 [docs/upgrade-lovia-0.9.235-zh.md](docs/upgrade-lovia-0.9.235-zh.md)；
+0.9.96 见 [docs/upgrade-lovia-0.9.112-zh.md](docs/upgrade-lovia-0.9.112-zh.md)；
 0.9.87 及更早版本先看 [docs/upgrade-lovia-0.9.96-zh.md](docs/upgrade-lovia-0.9.96-zh.md)。
 
 ## 许可证

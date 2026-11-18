@@ -26,7 +26,7 @@ copies a number. Built on [lovia](https://github.com/cymoo/lovia) and its web UI
   caps the outermost `LIMIT`. MySQL sessions are read-only too.
 - **Business definitions** as plain `SKILL.md` files the agent reads when needed.
 - **Memory and a workspace.** The agent keeps notes across chats when you ask
-  or confirm (preferences, definitions; editable on the Memory page) and works
+  or confirm (preferences, definitions; editable under Settings → Memory) and works
   in a directory of files, shown in the Files panel. It can also show its own tables, and
   interactive pages (`show_html`) such as a what-if calculator.
 
@@ -154,6 +154,7 @@ CI runs the integration tests against PostgreSQL 16, PostgreSQL 11 (the oldest
 supported) and MySQL 8.4 containers.
 
 Upgrading from an older lovia: see
+[docs/upgrade-lovia-0.9.235.md](docs/upgrade-lovia-0.9.235.md) (from 0.9.112),
 [docs/upgrade-lovia-0.9.112.md](docs/upgrade-lovia-0.9.112.md) (from 0.9.96), and before that
 [docs/upgrade-lovia-0.9.96.md](docs/upgrade-lovia-0.9.96.md) (from 0.9.87 or earlier).
 
